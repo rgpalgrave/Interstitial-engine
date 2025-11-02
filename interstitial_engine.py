@@ -1,14 +1,20 @@
 # =====================================================
-# interstitial_engine.py
-# Geometry + fast pair-circle engine for k_max and s*_N
-# (with caching + neighbor buckets + early-stop)
+# interstitial_engine.py (TURBO)
+# Minimal-image + KDTree + pruned pairs + early-stop
 # =====================================================
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Tuple, Optional, Dict, List
 import numpy as np
 from math import sqrt
+try:
+    # KDTree greatly reduces counting cost
+    from scipy.spatial import cKDTree as KDTree
+    _HAVE_SCIPY = True
+except Exception:
+    KDTree = None
+    _HAVE_SCIPY = False
 
 
 # -----------------
@@ -19,17 +25,16 @@ class LatticeParams:
     a: float = 1.0
     b_ratio: float = 1.0
     c_ratio: float = 1.0
-    alpha: float = 90.0  # degrees
+    alpha: float = 90.0  # deg
     beta: float = 90.0
     gamma: float = 90.0
-
 
 @dataclass
 class Sublattice:
     name: str
-    bravais: str                 # e.g. "cubic_F"
+    bravais: str
     offset_frac: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    alpha_ratio: float = 1.0     # per-lattice radius ratio α_i
+    alpha_ratio: float = 1.0
     visible: bool = True
 
 
@@ -37,284 +42,314 @@ class Sublattice:
 # Lattices & vectors
 # -----------------
 def bravais_basis(bravais: str) -> np.ndarray:
-    """Fractional basis points, mirroring the visualiser."""
     B = {
-        # Cubic family
-        "cubic_P":        [(0, 0, 0)],
-        "cubic_I":        [(0, 0, 0), (0.5, 0.5, 0.5)],
-        "cubic_F":        [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],
-        # Compound motifs on cubic
-        "cubic_Diamond": [
-            (0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5),
-            (0.25, 0.25, 0.25), (0.75, 0.75, 0.25), (0.75, 0.25, 0.75), (0.25, 0.75, 0.75)
+        # Cubic
+        "cubic_P":        [(0,0,0)],
+        "cubic_I":        [(0,0,0),(0.5,0.5,0.5)],
+        "cubic_F":        [(0,0,0),(0.5,0.5,0),(0.5,0,0.5),(0,0.5,0.5)],
+        # Compounds
+        "cubic_Diamond":  [
+            (0,0,0),(0.5,0.5,0),(0.5,0,0.5),(0,0.5,0.5),
+            (0.25,0.25,0.25),(0.75,0.75,0.25),(0.75,0.25,0.75),(0.25,0.75,0.75)
         ],
-        "cubic_Pyrochlore": [
-            (0.5, 0.5, 0.5), (0, 0, 0.5), (0, 0.5, 0), (0.5, 0, 0),
-            (0.25, 0.75, 0), (0.75, 0.25, 0), (0.75, 0.75, 0.5), (0.25, 0.25, 0.5),
-            (0.75, 0, 0.25), (0.25, 0.5, 0.25), (0.25, 0, 0.75), (0.75, 0.5, 0.75),
-            (0, 0.25, 0.75), (0.5, 0.75, 0.75), (0.5, 0.25, 0.25), (0, 0.75, 0.25)
+        "cubic_Pyrochlore":[
+            (0.5,0.5,0.5),(0,0,0.5),(0,0.5,0),(0.5,0,0),
+            (0.25,0.75,0),(0.75,0.25,0),(0.75,0.75,0.5),(0.25,0.25,0.5),
+            (0.75,0,0.25),(0.25,0.5,0.25),(0.25,0,0.75),(0.75,0.5,0.75),
+            (0,0.25,0.75),(0.5,0.75,0.75),(0.5,0.25,0.25),(0,0.75,0.25)
         ],
         # Tetragonal
-        "tetragonal_P":   [(0, 0, 0)],
-        "tetragonal_I":   [(0, 0, 0), (0.5, 0.5, 0.5)],
+        "tetragonal_P":   [(0,0,0)],
+        "tetragonal_I":   [(0,0,0),(0.5,0.5,0.5)],
         # Orthorhombic
-        "orthorhombic_P": [(0, 0, 0)],
-        "orthorhombic_C": [(0, 0, 0), (0.5, 0.5, 0)],
-        "orthorhombic_I": [(0, 0, 0), (0.5, 0.5, 0.5)],
-        "orthorhombic_F": [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],
-        # Hexagonal / HCP
-        "hexagonal_P":    [(0, 0, 0)],
-        "hexagonal_HCP":  [(0, 0, 0), (1/3, 2/3, 0.5)],
+        "orthorhombic_P": [(0,0,0)],
+        "orthorhombic_C": [(0,0,0),(0.5,0.5,0)],
+        "orthorhombic_I": [(0,0,0),(0.5,0.5,0.5)],
+        "orthorhombic_F": [(0,0,0),(0.5,0.5,0),(0.5,0,0.5),(0,0.5,0.5)],
+        # Hexagonal
+        "hexagonal_P":    [(0,0,0)],
+        "hexagonal_HCP":  [(0,0,0),(1/3,2/3,0.5)],
         # Rhombohedral
-        "rhombohedral_R": [(0, 0, 0)],
+        "rhombohedral_R": [(0,0,0)],
         # Monoclinic / Triclinic
-        "monoclinic_P":   [(0, 0, 0)],
-        "monoclinic_C":   [(0, 0, 0), (0.5, 0.5, 0)],
-        "triclinic_P":    [(0, 0, 0)],
+        "monoclinic_P":   [(0,0,0)],
+        "monoclinic_C":   [(0,0,0),(0.5,0.5,0)],
+        "triclinic_P":    [(0,0,0)],
     }
     if bravais not in B:
         raise ValueError(f"Unknown bravais type: {bravais}")
     return np.asarray(B[bravais], dtype=float)
 
-
 def lattice_vectors(p: LatticeParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return a, b, c vectors. Orthogonal fast path; general (α,β,γ) fallback."""
     a = p.a
     b = p.a * p.b_ratio
     c = p.a * p.c_ratio
-    if abs(p.alpha - 90) < 1e-9 and abs(p.beta - 90) < 1e-9 and abs(p.gamma - 90) < 1e-9:
-        return np.array([a, 0, 0.0]), np.array([0.0, b, 0.0]), np.array([0.0, 0.0, c])
+    if abs(p.alpha-90)<1e-9 and abs(p.beta-90)<1e-9 and abs(p.gamma-90)<1e-9:
+        return np.array([a,0,0.0]), np.array([0.0,b,0.0]), np.array([0.0,0.0,c])
 
-    # General cell
-    alp = np.deg2rad(p.alpha)
-    bet = np.deg2rad(p.beta)
-    gam = np.deg2rad(p.gamma)
-    avec = np.array([a, 0, 0], float)
-    bvec = np.array([b * np.cos(gam), b * np.sin(gam), 0.0], float)
-    cx = c * np.cos(bet)
-    cy = c * (np.cos(alp) - np.cos(bet) * np.cos(gam)) / max(1e-12, np.sin(gam))
-    cz2 = max(0.0, c * c - cx * cx - cy * cy)
-    cvec = np.array([cx, cy, sqrt(cz2)], float)
+    alp = np.deg2rad(p.alpha); bet = np.deg2rad(p.beta); gam = np.deg2rad(p.gamma)
+    avec = np.array([a,0,0], float)
+    bvec = np.array([b*np.cos(gam), b*np.sin(gam), 0.0], float)
+    cx  = c*np.cos(bet)
+    cy  = c*(np.cos(alp) - np.cos(bet)*np.cos(gam))/max(1e-12, np.sin(gam))
+    cz2 = max(0.0, c*c - cx*cx - cy*cy)
+    cvec= np.array([cx, cy, sqrt(cz2)], float)
     return avec, bvec, cvec
 
-
-def frac_to_cart(frac: np.ndarray, avec: np.ndarray, bvec: np.ndarray, cvec: np.ndarray) -> np.ndarray:
-    return frac[0] * avec + frac[1] * bvec + frac[2] * cvec
-
-
-def generate_points(s: Sublattice, p: LatticeParams, repeat: int = 1, include_ghost: bool = True) -> np.ndarray:
-    a, b, c = lattice_vectors(p)
-    basis = bravais_basis(s.bravais)
-    start = -1 if include_ghost else 0
-    end = repeat + 1 if include_ghost else repeat
-    off = np.array(s.offset_frac, float)
-    pts: List[np.ndarray] = []
-    for i in range(start, end):
-        for j in range(start, end):
-            for k in range(start, end):
-                cell = np.array([i, j, k], float)
-                for b0 in basis:
-                    f = cell + np.array(b0, float) + off
-                    pts.append(frac_to_cart(f, a, b, c))
-    return np.asarray(pts)
+def frac_to_cart(frac: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    return frac[0]*a + frac[1]*b + frac[2]*c
 
 
 # -----------------
-# Pair-circle engine
+# Minimal-image centers (no supercell)
+# -----------------
+def generate_centers_minimal(sub: Sublattice, p: LatticeParams) -> np.ndarray:
+    """Return centers of a sublattice for the single reference cell only."""
+    a,b,c = lattice_vectors(p)
+    basis = bravais_basis(sub.bravais)
+    off = np.array(sub.offset_frac, float)
+    pts = [frac_to_cart(np.asarray(b0)+off, a,b,c) for b0 in basis]
+    return np.asarray(pts, float)
+
+@lru_cache(maxsize=128)
+def centers_alphas_and_shifts(subs_key, p_key):
+    """Cache central-cell centers, per-center alpha, and 27 neighbor lattice shifts."""
+    p = LatticeParams(*p_key)
+    a,b,c = lattice_vectors(p)
+    # 27 neighbor shifts (fractional -1,0,1 → cartesian)
+    shifts = []
+    for i in (-1,0,1):
+        for j in (-1,0,1):
+            for k in (-1,0,1):
+                shifts.append(frac_to_cart(np.array([i,j,k], float), a,b,c))
+    shifts = np.asarray(shifts, float)  # (27,3)
+
+    centers = []
+    alphas = []
+    for (bravais, ox,oy,oz, alpha_ratio, visible) in subs_key:
+        if not visible: 
+            continue
+        sub = Sublattice("x", bravais, (ox,oy,oz), alpha_ratio, True)
+        pts = generate_centers_minimal(sub, p)
+        centers.append(pts)
+        alphas.append(np.full(len(pts), alpha_ratio, float))
+    if centers:
+        centers = np.vstack(centers)
+        alphas  = np.concatenate(alphas)
+    else:
+        centers = np.empty((0,3)); alphas = np.empty((0,))
+    return centers, alphas, shifts
+
+
+# -----------------
+# Pair list under PBC (reference→neighbors)
+# -----------------
+def periodic_candidate_pairs(centers: np.ndarray, shifts: np.ndarray, cutoff: float) -> List[Tuple[int,int,int]]:
+    """
+    Build (i, j, s_idx) with i from reference cell, j from reference cell, and s_idx selecting a neighbor shift.
+    Keep pairs where distance between centers[i] and centers[j]+shift < cutoff.
+    Only emit i < (j,shift) in a canonical ordering to avoid duplicates.
+    """
+    if len(centers) == 0:
+        return []
+    pairs: List[Tuple[int,int,int]] = []
+    cutoff2 = cutoff*cutoff
+    n = len(centers)
+    # Precompute shifted copies per shift to avoid recomputing sums per pair
+    # But keep memory sane: do it per shift
+    for s_idx, S in enumerate(shifts):
+        shifted = centers + S  # (n,3)
+        # distance matrix to same n centers → but prune by row-wise k-d selection:
+        # simple block approach to cap memory:
+        B = 512
+        for start in range(0, n, B):
+            end = min(n, start+B)
+            block = centers[start:end]  # (b,3)
+            d2 = np.sum((block[:,None,:] - shifted[None,:,:])**2, axis=2)  # (b,n)
+            # For canonical ordering, avoid emitting (i,j,s) where s is (0,0,0) and j<=i
+            if s_idx == 13:  # shift (0,0,0) in our 27 ordering? (middle of list)
+                # safer: compute index by known layout: i in (-1,0,1)^3 → index = (i+1)*9 + (j+1)*3 + (k+1)
+                pass
+            # We'll simply keep all and deduplicate later by a strict rule:
+            bi, bj = np.where(d2 < cutoff2)
+            for ii, jj in zip(bi, bj):
+                gi = start + ii
+                # canonical rule: (shift index, j, i) must be lexicographically greater than (13, i, i)
+                # To keep it simple and robust, only keep:
+                #   - s_idx > 13, or
+                #   - s_idx == 13 and jj > gi
+                if (s_idx > 13) or (s_idx == 13 and jj > gi):
+                    pairs.append((gi, jj, s_idx))
+    return pairs
+
+
+# -----------------
+# Pair-circle sampling
 # -----------------
 def pair_circle_samples(c1: np.ndarray, r1: float, c2: np.ndarray, r2: float, k: int = 8) -> np.ndarray:
     v = c2 - c1
-    d2 = float(np.dot(v, v))
+    d2 = float(np.dot(v,v))
     if d2 <= 1e-24:
-        return np.empty((0, 3))
+        return np.empty((0,3))
     d = sqrt(d2)
-    # overlap condition (not contained, not disjoint)
     if not (abs(r1 - r2) < d < (r1 + r2)):
-        return np.empty((0, 3))
+        return np.empty((0,3))
     n = v / d
-    t = (r1 * r1 - r2 * r2 + d * d) / (2 * d * d)
-    center = c1 + t * v
-
-    # in-plane basis
-    tmp = np.array([1.0, 0.0, 0.0]) if abs(n[0]) <= 0.9 else np.array([0.0, 1.0, 0.0])
-    u = np.cross(tmp, n)
-    nu = float(np.linalg.norm(u))
+    t = (r1*r1 - r2*r2 + d*d) / (2*d*d)
+    center = c1 + t*v
+    tmp = np.array([1.0,0.0,0.0]) if abs(n[0]) <= 0.9 else np.array([0.0,1.0,0.0])
+    u = np.cross(tmp, n); nu = float(np.linalg.norm(u))
     if nu < 1e-12:
-        tmp = np.array([0.0, 0.0, 1.0])
-        u = np.cross(tmp, n)
-        nu = float(np.linalg.norm(u))
+        tmp = np.array([0.0,0.0,1.0])
+        u = np.cross(tmp, n); nu = float(np.linalg.norm(u))
         if nu < 1e-12:
-            return np.empty((0, 3))
+            return np.empty((0,3))
     u /= nu
-    w = np.cross(n, u)
-
-    # circle radius (h) from r1 and offset
+    w = np.cross(n,u)
     off = center - c1
-    h2 = r1 * r1 - float(np.dot(off, off))
-    if h2 <= 0:
-        return np.empty((0, 3))
+    h2 = r1*r1 - float(np.dot(off,off))
+    if h2 <= 0.0:
+        return np.empty((0,3))
     h = sqrt(h2)
-
-    # sample points
-    angles = np.linspace(0.0, 2.0 * np.pi, k, endpoint=False)
-    return center + (h * np.cos(angles))[:, None] * u + (h * np.sin(angles))[:, None] * w
+    ang = np.linspace(0.0, 2.0*np.pi, k, endpoint=False)
+    return center + (h*np.cos(ang))[:,None]*u + (h*np.sin(ang))[:,None]*w
 
 
 def _cluster(points: np.ndarray, counts: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Greedy radius clustering; small N so this is fine."""
     if len(points) == 0:
         return points, counts
-    used = np.zeros(len(points), dtype=bool)
+    used = np.zeros(len(points), bool)
     reps = []
     repc = []
-    eps2 = eps * eps
+    eps2 = eps*eps
     for i in range(len(points)):
-        if used[i]:
+        if used[i]: 
             continue
         acc = [i]
-        for j in range(i + 1, len(points)):
-            if used[j]:
+        for j in range(i+1, len(points)):
+            if used[j]: 
                 continue
-            d2 = float(np.dot(points[i] - points[j], points[i] - points[j]))
+            d2 = float(np.dot(points[i]-points[j], points[i]-points[j]))
             if d2 < eps2:
                 acc.append(j)
         used[acc] = True
         reps.append(np.mean(points[acc], axis=0))
         repc.append(int(np.max(counts[acc])))
-    return np.asarray(reps), np.asarray(repc, dtype=int)
+    return np.asarray(reps), np.asarray(repc, int)
 
 
 # -----------------
-# Geometry cache
+# Cached geometry bundle (minimal image)
 # -----------------
 @dataclass(frozen=True)
 class GeoKey:
-    p: Tuple[float, float, float, float, float, float]
-    repeat: int
-    subs: Tuple[Tuple[str, float, float, float, float, bool], ...]  # (bravais, offx, offy, offz, alpha_ratio, visible)
+    p: Tuple[float,float,float,float,float,float]
+    subs: Tuple[Tuple[str,float,float,float,float,bool], ...]  # (bravais, offx,offy,offz, alpha_ratio, visible)
 
-
-def _make_key(sublattices: List[Sublattice], p: LatticeParams, repeat: int) -> GeoKey:
+def _make_key(sublattices: List[Sublattice], p: LatticeParams) -> GeoKey:
     subs_key = tuple((s.bravais, float(s.offset_frac[0]), float(s.offset_frac[1]), float(s.offset_frac[2]),
                       float(s.alpha_ratio), bool(s.visible)) for s in sublattices)
     p_key = (float(p.a), float(p.b_ratio), float(p.c_ratio), float(p.alpha), float(p.beta), float(p.gamma))
-    return GeoKey(p=p_key, repeat=int(repeat), subs=subs_key)
+    return GeoKey(p=p_key, subs=subs_key)
 
-
-@lru_cache(maxsize=128)
-def build_geometry_cache(key: GeoKey):
-    """Build centers, per-sphere α multipliers, and a static spatial hash buckets."""
-    p = LatticeParams(*key.p)
-    centers_list = []
-    alpha_list = []
-    for bravais, offx, offy, offz, alpha_ratio, visible in key.subs:
-        if not visible:
-            continue
-        sub = Sublattice(name="x", bravais=bravais, offset_frac=(offx, offy, offz), alpha_ratio=alpha_ratio, visible=True)
-        pts = generate_points(sub, p, repeat=key.repeat, include_ghost=True)
-        centers_list.append(pts)
-        alpha_list.append(np.full(len(pts), alpha_ratio, dtype=float))
-
-    if not centers_list:
-        return (np.empty((0, 3)), np.empty((0,)), None)
-
-    centers = np.vstack(centers_list).astype(float)
-    alphas = np.concatenate(alpha_list).astype(float)
-
-    # Build static spatial hash with a modest cell size (linked to a)
-    L = p.a * 0.9
-    mins = centers.min(axis=0) - 1e-9
-    idx = np.floor((centers - mins) / L).astype(int)
-    from collections import defaultdict
-    buckets = defaultdict(list)
-    for i, keyc in enumerate(map(tuple, idx)):
-        buckets[keyc].append(i)
-
-    # Pre-store neighbor offset list
-    offs = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
-    return centers, alphas, (mins, L, buckets, offs)
-
-
-def _pairs_within_cutoff(centers: np.ndarray, grid, cutoff: float) -> np.ndarray:
-    """Return i<j pairs within given cutoff using cached buckets."""
-    if centers.size == 0:
-        return np.empty((0, 2), dtype=int)
-    mins, L, buckets, offs = grid
-    cutoff2 = cutoff * cutoff
-    pairs: List[Tuple[int, int]] = []
-    # Iterate buckets; compare within own+neighbor buckets
-    for keyc, ids in buckets.items():
-        nbr = []
-        for o in offs:
-            k2 = (keyc[0] + o[0], keyc[1] + o[1], keyc[2] + o[2])
-            if k2 in buckets:
-                nbr += buckets[k2]
-        if not nbr:
-            continue
-        nbr_arr = np.array(sorted(set(nbr)), dtype=int)
-        ids_arr = np.array(ids, dtype=int)
-        for i in ids_arr:
-            js = nbr_arr[nbr_arr > i]
-            if js.size == 0:
-                continue
-            d2 = np.sum((centers[js] - centers[i]) ** 2, axis=1)
-            within = js[d2 < cutoff2]
-            if within.size:
-                pairs.extend([(i, int(j)) for j in within])
-    if not pairs:
-        return np.empty((0, 2), dtype=int)
-    return np.asarray(pairs, dtype=int)
+@lru_cache(maxsize=256)
+def build_geo(key: GeoKey):
+    centers, alphas, shifts = centers_alphas_and_shifts(key.subs, key.p)
+    # Precompute a canonical “same-cell” index of the zero shift (13) for dedup rule
+    # We stored shifts in nested loops (-1..1). The middle element index is 13.
+    zero_shift_idx = 13
+    return centers, alphas, shifts, zero_shift_idx
 
 
 # -----------------
 # Public API
 # -----------------
+def _build_pairs_for_cutoff(centers: np.ndarray, shifts: np.ndarray, cutoff: float) -> List[Tuple[int,int,int]]:
+    # Pairs under PBC up to cutoff
+    return periodic_candidate_pairs(centers, shifts, cutoff)
+
+def _count_multiplicity_kdtree(sample_pts: np.ndarray, tree: KDTree, radii: np.ndarray, tol_inside: float) -> np.ndarray:
+    # We want count of spheres whose surface passes within tol of each sample point.
+    # Approx: treat as center distance <= r + tol_inside
+    # For speed, query neighbor centers within rmax+tol, then check per-sphere radius threshold.
+    rmax = float(np.max(radii))
+    idxs = tree.query_ball_point(sample_pts, r=rmax + tol_inside)  # list of lists
+    out = np.zeros(len(sample_pts), dtype=int)
+    for i, neigh in enumerate(idxs):
+        if not neigh:
+            continue
+        d = np.linalg.norm(tree.data[neigh] - sample_pts[i], axis=1)
+        out[i] = int(np.sum(d <= (radii[neigh] + tol_inside)))
+    return out
+
 def max_multiplicity_for_scale(
     sublattices: List[Sublattice],
     p: LatticeParams,
-    repeat: int,
+    repeat_ignored: int,  # kept for UI compatibility; minimal-image ignores it
     scale_s: float,
     k_samples: int = 8,
     tol_inside: float = 1e-3,
     cluster_eps: Optional[float] = None,
     early_stop_at: Optional[int] = None,
 ) -> Tuple[int, np.ndarray, np.ndarray]:
-    """Compute k_max at this s, returning (k_max, hotspots_xyz, hotspots_counts)."""
-    key = _make_key(sublattices, p, repeat)
-    centers, alphas, grid = build_geometry_cache(key)
-    if len(centers) == 0:
-        return 0, np.empty((0, 3)), np.empty((0,))
-
+    key = _make_key(sublattices, p)
+    centers, alphas, shifts, zero_idx = build_geo(key)
+    if centers.size == 0:
+        return 0, np.empty((0,3)), np.empty((0,))
     radii = (alphas * scale_s * p.a).astype(float)
     rmax = float(np.max(radii))
-    # Candidate pairs only within 2*rmax
-    if grid is None:
-        return 0, np.empty((0, 3)), np.empty((0,))
-    pairs = _pairs_within_cutoff(centers, grid, cutoff=2.0 * rmax)
-    if len(pairs) == 0:
-        return 0, np.empty((0, 3)), np.empty((0,))
+
+    # Build pairs once per s using cutoff = 2*rmax (pruned by distance)
+    pairs = _build_pairs_for_cutoff(centers, shifts, cutoff=2.0*rmax)
+    if not pairs:
+        return 0, np.empty((0,3)), np.empty((0,))
+
+    # KDTree on all 27 images? We only need counts versus sphere centers in *all* images.
+    # Build a merged set of centers over 27 shifts (but keep memory ok):
+    # Instead, build one KDTree on the central cell, but query across all shifts by transforming sample points back.
+    # Trick: For each shift S, counting (centers + S) vs point P equals counting centers vs (P - S).
+    if _HAVE_SCIPY:
+        tree = KDTree(centers.copy())
+    else:
+        tree = None  # will fallback to slower vector method
 
     samples: List[np.ndarray] = []
     counts: List[int] = []
-    tol2 = (tol_inside) ** 2  # used in exact-equality mode; we use (d <= r+tol) below
 
-    # Loop candidate pairs → sample circle → count multiplicity (vectorized)
-    for i, j in pairs:
-        pts = pair_circle_samples(centers[i], radii[i], centers[j], radii[j], k=k_samples)
+    for (i, j, s_idx) in pairs:
+        # construct the two sphere centers under this shift
+        c1 = centers[i]
+        c2 = centers[j] + shifts[s_idx]
+        r1 = radii[i]; r2 = radii[j]
+        pts = pair_circle_samples(c1, r1, c2, r2, k=k_samples)
         if pts.size == 0:
             continue
-        # distances: [k, n]
-        d = np.linalg.norm(centers[None, :, :] - pts[:, None, :], axis=2)
-        c = np.sum(d <= (radii[None, :] + tol_inside), axis=1)
+
+        # Count multiplicity across all periodic images using KDTree trick:
+        if _HAVE_SCIPY:
+            total = np.zeros(len(pts), dtype=int)
+            for S in shifts:
+                # centers+S vs P  <=> centers vs (P - S)
+                P = pts - S
+                c = _count_multiplicity_kdtree(P, tree, radii, tol_inside)
+                total += c
+            c = total
+        else:
+            # Fallback (slower): explicitly build 27 images once per call
+            all_centers = np.vstack([centers + S for S in shifts])
+            all_radii   = np.tile(radii, len(shifts))
+            d = np.linalg.norm(all_centers[None,:,:] - pts[:,None,:], axis=2)
+            c = np.sum(d <= (all_radii[None,:] + tol_inside), axis=1)
+
         if early_stop_at is not None and np.any(c >= early_stop_at):
-            # collect a couple of hits to avoid empty return
             keep = np.where(c >= 2)[0][:3]
             samples.extend(pts[keep])
             counts.extend([int(x) for x in c[keep]])
+            m = int(np.max(c))
             if cluster_eps is None:
                 cluster_eps = 0.1 * p.a
-            reps, repc = _cluster(np.asarray(samples), np.asarray(counts, dtype=int), eps=cluster_eps)
-            return int(np.max(c)), reps, repc
+            reps, repc = _cluster(np.asarray(samples), np.asarray(counts, int), eps=cluster_eps)
+            return m, reps, repc
 
         good = np.where(c >= 2)[0]
         if good.size:
@@ -322,13 +357,11 @@ def max_multiplicity_for_scale(
             counts.extend([int(x) for x in c[good]])
 
     if not samples:
-        return 0, np.empty((0, 3)), np.empty((0,))
+        return 0, np.empty((0,3)), np.empty((0,))
 
-    samples_arr = np.asarray(samples)
-    counts_arr = np.asarray(counts, dtype=int)
     if cluster_eps is None:
         cluster_eps = 0.1 * p.a
-    reps, repc = _cluster(samples_arr, counts_arr, eps=cluster_eps)
+    reps, repc = _cluster(np.asarray(samples), np.asarray(counts, int), eps=cluster_eps)
     mmax = int(repc.max()) if len(repc) else 0
     return mmax, reps, repc
 
@@ -337,7 +370,7 @@ def find_threshold_s_for_N(
     N_target: int,
     sublattices: List[Sublattice],
     p: LatticeParams,
-    repeat: int = 1,
+    repeat: int = 1,          # ignored (minimal-image)
     s_min: float = 0.01,
     s_max: float = 0.9,
     k_samples_coarse: int = 6,
@@ -346,59 +379,45 @@ def find_threshold_s_for_N(
     cluster_eps: Optional[float] = None,
     max_iter: int = 28,
 ) -> Tuple[Optional[float], Dict[int, float]]:
-    """Return (s*_N, milestones). Uses coarse→fine sampling and aggressive early-stop."""
     milestones: Dict[int, float] = {}
-    # Coarse sweep to bracket
-    grid = np.linspace(s_min, s_max, 16)
-    hit = False
-    for s in grid:
-        m, _, _ = max_multiplicity_for_scale(
-            sublattices, p, repeat, s,
-            k_samples=k_samples_coarse,
-            tol_inside=tol_inside,
-            cluster_eps=cluster_eps,
-            early_stop_at=N_target
+    # coarse sweep
+    for s in np.linspace(s_min, s_max, 16):
+        m,_,_ = max_multiplicity_for_scale(
+            sublattices, p, 1, s,
+            k_samples=k_samples_coarse, tol_inside=tol_inside,
+            cluster_eps=cluster_eps, early_stop_at=N_target
         )
         milestones.setdefault(int(m), float(s))
         if m >= N_target:
-            hit = True
+            s_hi = s
             break
-    if not hit:
+    else:
         return None, milestones
 
-    # refine bracket
-    s_hi = s
+    # refine low bound
     s_lo = s_min
     for s2 in np.linspace(s_min, s_hi, 16):
-        m, _, _ = max_multiplicity_for_scale(
-            sublattices, p, repeat, s2,
-            k_samples=k_samples_coarse,
-            tol_inside=tol_inside,
-            cluster_eps=cluster_eps,
-            early_stop_at=N_target
+        m,_,_ = max_multiplicity_for_scale(
+            sublattices, p, 1, s2,
+            k_samples=k_samples_coarse, tol_inside=tol_inside,
+            cluster_eps=cluster_eps, early_stop_at=N_target
         )
-        if m < N_target:
-            s_lo = s2
+        if m < N_target: s_lo = s2
         else:
-            s_hi = s2
-            break
+            s_hi = s2; break
 
-    # bisection (adaptive samples: coarse while wide, fine near convergence)
+    # bisection
     for _ in range(max_iter):
-        mid = 0.5 * (s_lo + s_hi)
+        mid = 0.5*(s_lo+s_hi)
         ks = k_samples_coarse if (s_hi - s_lo) > 0.02 else k_samples_fine
-        m, _, _ = max_multiplicity_for_scale(
-            sublattices, p, repeat, mid,
-            k_samples=ks,
-            tol_inside=tol_inside,
-            cluster_eps=cluster_eps,
-            early_stop_at=N_target
+        m,_,_ = max_multiplicity_for_scale(
+            sublattices, p, 1, mid,
+            k_samples=ks, tol_inside=tol_inside,
+            cluster_eps=cluster_eps, early_stop_at=N_target
         )
-        if m >= N_target:
-            s_hi = mid
-        else:
-            s_lo = mid
-        if abs(s_hi - s_lo) < 1e-4:
-            break
+        if m >= N_target: s_hi = mid
+        else: s_lo = mid
+        if abs(s_hi - s_lo) < 1e-4: break
+
     milestones[N_target] = s_hi
     return s_hi, milestones
