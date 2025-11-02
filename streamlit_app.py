@@ -1,13 +1,13 @@
 # =====================================================
 # streamlit_app.py
 # Interstitial-site finder — fast pair-circle engine
-# (UI with param scan; supports up to 6 sublattices)
+# (UI with chemistry mode: α_i = r_metal + r_anion)
 # =====================================================
 
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List
+from typing import List, Dict
 
 from interstitial_engine import (
     LatticeParams,
@@ -16,7 +16,72 @@ from interstitial_engine import (
     find_threshold_s_for_N,
 )
 
-# Setup
+# -------------------------------
+# Chemistry radii database (VI-coordination, ~Shannon-like)
+# Units: Å. One representative ionic radius per cation charge.
+# These are "good-enough" defaults; override per-sublattice if needed.
+# -------------------------------
+
+ANION_RADII: Dict[str, float] = {
+    # Common single-anion choices (approx VI)
+    "O": 1.38,   # O2-
+    "S": 1.84,   # S2-
+    "Se": 1.98,  # Se2-
+    "F": 1.33,   # F-
+    "Cl": 1.81,  # Cl-
+    "Br": 1.96,  # Br-
+    "I": 2.20,   # I-
+}
+
+# Metals: element -> {oxidation: radius (Å) }, VI-coordination representatives
+METAL_RADII: Dict[str, Dict[int, float]] = {
+    # Alkali
+    "Li": {1: 0.76}, "Na": {1: 1.02}, "K": {1: 1.38}, "Rb": {1: 1.52}, "Cs": {1: 1.67},
+    # Alkaline earth
+    "Be": {2: 0.59}, "Mg": {2: 0.72}, "Ca": {2: 1.00}, "Sr": {2: 1.18}, "Ba": {2: 1.35},
+    # Group 13/14
+    "Al": {3: 0.535}, "Ga": {3: 0.62}, "In": {3: 0.80}, "Tl": {1: 1.59, 3: 0.885},
+    "Si": {4: 0.40}, "Ge": {4: 0.53}, "Sn": {2: 1.18, 4: 0.69}, "Pb": {2: 1.19, 4: 0.775},
+    # Early TM / tetravalent cations
+    "Ti": {3: 0.67, 4: 0.605}, "Zr": {4: 0.72}, "Hf": {4: 0.71},
+    "V": {2: 0.79, 3: 0.64, 4: 0.58, 5: 0.54},
+    "Nb": {5: 0.64}, "Ta": {5: 0.64},
+    "Mo": {4: 0.65, 5: 0.61, 6: 0.59}, "W": {4: 0.66, 5: 0.62, 6: 0.60},
+    # 3d TMs (HS where relevant, VI)
+    "Sc": {3: 0.745}, "Y": {3: 0.90},
+    "Cr": {2: 0.80, 3: 0.615, 6: 0.52},
+    "Mn": {2: 0.83, 3: 0.645, 4: 0.67},
+    "Fe": {2: 0.78, 3: 0.645},
+    "Co": {2: 0.745, 3: 0.61},
+    "Ni": {2: 0.69, 3: 0.56},
+    "Cu": {1: 0.91, 2: 0.73}, "Zn": {2: 0.74},
+    # Post-TM
+    "Cd": {2: 0.95}, "Hg": {2: 1.16},
+    # 4d/5d miscellany
+    "Ru": {3: 0.68, 4: 0.62}, "Rh": {3: 0.665, 4: 0.60}, "Pd": {2: 0.86, 4: 0.615},
+    "Ag": {1: 1.15}, "Au": {1: 1.37, 3: 0.85},
+    "Pt": {2: 0.80, 4: 0.625},
+    # Rare earths (Ln3+, VI)
+    "La": {3: 1.032}, "Ce": {3: 1.01, 4: 0.87}, "Pr": {3: 0.99}, "Nd": {3: 0.983},
+    "Sm": {3: 0.958}, "Eu": {2: 1.25, 3: 0.947}, "Gd": {3: 0.938}, "Tb": {3: 0.923},
+    "Dy": {3: 0.912}, "Ho": {3: 0.901}, "Er": {3: 0.89}, "Tm": {3: 0.88},
+    "Yb": {2: 1.16, 3: 0.868}, "Lu": {3: 0.861},
+    # Others commonly used
+    "B": {3: 0.27}, "P": {5: 0.52}, "As": {5: 0.60}, "Sb": {5: 0.74}, "Bi": {3: 1.03, 5: 0.76},
+    "Ti": {4: 0.605}, "Ta": {5: 0.64}, "Nb": {5: 0.64},
+}
+
+def norm_el(sym: str) -> str:
+    sym = sym.strip()
+    return sym[0].upper() + sym[1:].lower() if sym else sym
+
+def get_metal_radii_options(element: str) -> Dict[int, float]:
+    e = norm_el(element)
+    return METAL_RADII.get(e, {})
+
+# -------------------------------
+# Streamlit setup
+# -------------------------------
 st.set_page_config(page_title="Interstitial-site finder — fast visualiser logic", layout="wide")
 st.title("Interstitial-site finder — fast pair-circle engine (Streamlit)")
 
@@ -39,9 +104,13 @@ tol_inside = st.sidebar.number_input("Inside tolerance", 0.0, 0.02, 0.001, 0.000
 cluster_eps = st.sidebar.number_input("Cluster radius (×a)", 0.01, 0.5, 0.1, 0.01)
 
 # -------------------------------
-# Sublattices (up to 6)
+# Sublattices (up to 6) + Chemistry mode
 # -------------------------------
 st.subheader("Sublattices (1–6)")
+
+chem_mode = st.checkbox("Chemistry mode (set α from metal + anion radii)", value=True)
+anion = st.selectbox("Global anion", list(ANION_RADII.keys()), index=list(ANION_RADII.keys()).index("O"))
+r_anion = ANION_RADII[anion]
 
 bravais_choices = [
     # Cubic
@@ -58,21 +127,48 @@ bravais_choices = [
     "monoclinic_P","monoclinic_C","triclinic_P",
 ]
 
-def edit_sublattice(idx: int) -> Sublattice:
+def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
     with st.expander(f"Sublattice {idx} settings", expanded=(idx <= 3)):
         cols = st.columns(3)
         with cols[0]:
             bravais = st.selectbox(
                 f"Bravais {idx}", bravais_choices, index=2 if idx == 1 else 0, key=f"brv{idx}"
             )
-            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"ar{idx}")
             enabled = st.checkbox(f"Enable {idx}", value=True, key=f"vis{idx}")
+
         with cols[1]:
             offx = st.number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"ox{idx}")
             offy = st.number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oy{idx}")
             offz = st.number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oz{idx}")
+
         with cols[2]:
             name = st.text_input(f"Name {idx}", f"Sub{idx}", key=f"name{idx}")
+
+        if use_chem:
+            c1, c2 = st.columns(2)
+            with c1:
+                # Metal picker
+                elements = sorted(METAL_RADII.keys())
+                default_el = "Fe" if idx == 1 else elements[0]
+                el = st.selectbox(f"Metal {idx}", elements, index=elements.index(default_el), key=f"el{idx}")
+                ox_map = get_metal_radii_options(el)
+                ox_states = sorted(ox_map.keys())
+                ox = st.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"ox{idx}")
+                r_metal_default = ox_map.get(ox, None)
+            with c2:
+                r_override = st.number_input(
+                    f"Manual metal radius {idx} (Å, optional)", 0.0, 3.0,
+                    value=float(r_metal_default if r_metal_default is not None else 0.0),
+                    step=0.01, key=f"rman{idx}"
+                )
+                use_override = st.checkbox(f"Use manual metal radius {idx}", value=False, key=f"useman{idx}")
+
+            r_metal = float(r_override) if use_override else float(r_metal_default if r_metal_default else 0.0)
+            alpha_ratio = r_metal + r_anion
+            st.caption(f"Computed α_{idx} = r_metal ({r_metal:.3f}) + r_{anion} ({r_anion:.3f}) = {alpha_ratio:.3f} Å")
+        else:
+            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"ar{idx}")
+
     return Sublattice(
         name=name,
         bravais=bravais,
@@ -81,8 +177,8 @@ def edit_sublattice(idx: int) -> Sublattice:
         visible=enabled,
     )
 
-n_sub = st.slider("Number of sublattices", 1, 6, 1)   # <-- now up to 6
-subs: List[Sublattice] = [edit_sublattice(i + 1) for i in range(n_sub)]
+n_sub = st.slider("Number of sublattices", 1, 6, 1)
+subs: List[Sublattice] = [edit_sublattice(i + 1, chem_mode) for i in range(n_sub)]
 
 p = LatticeParams(a=a, b_ratio=b_ratio, c_ratio=c_ratio, alpha=alpha, beta=beta, gamma=gamma)
 
@@ -95,7 +191,7 @@ st.subheader("Evaluate multiplicity or find s*_N")
 colA, colB = st.columns(2)
 
 with colA:
-    s_test = st.number_input("Evaluate at s", 0.0, 2.0, 0.35, 0.001)
+    s_test = st.number_input("Evaluate at s", 0.0, 5.0, 0.35, 0.001)
     if st.button("Compute k_max(s)"):
         m, reps, repc = max_multiplicity_for_scale(
             subs, p, repeat, s_test,
@@ -109,8 +205,8 @@ with colA:
 
 with colB:
     N_target = st.slider("Target N", 2, 12, 4)
-    s_min = st.number_input("s_min", 0.0, 2.0, 0.01, 0.001)
-    s_max = st.number_input("s_max", 0.0, 2.0, 0.9, 0.001)
+    s_min = st.number_input("s_min", 0.0, 5.0, 0.01, 0.001)
+    s_max = st.number_input("s_max", 0.0, 5.0, 0.9, 0.001)
     if st.button("Find s*_N (bisection)"):
         s_star, milestones = find_threshold_s_for_N(
             N_target, subs, p, repeat,
@@ -145,8 +241,8 @@ vmax = st.number_input("Param max", value=float(vmax_default))
 steps = st.slider("Steps", 5, 101, 25)
 Ns = [2, 3, 4, 5, 6]
 
-srange_min = st.number_input("s_min (radius scale)", 0.0, 2.0, 0.01, 0.001, key="smin_scan")
-srange_max = st.number_input("s_max (radius scale)", 0.0, 2.0, 0.9, 0.001, key="smax_scan")
+srange_min = st.number_input("s_min (radius scale)", 0.0, 5.0, 0.01, 0.001, key="smin_scan")
+srange_max = st.number_input("s_max (radius scale)", 0.0, 5.0, 0.9, 0.001, key="smax_scan")
 
 if st.button("Run scan"):
     xs = np.linspace(vmin, vmax, int(steps))
@@ -183,6 +279,6 @@ if st.button("Run scan"):
     st.pyplot(fig, clear_figure=True)
 
 st.caption(
-    "Radii are r_i = α_i · s · a. Engine caches geometry & uses minimal-image + KDTree counting. "
-    "Tip: hexagonal → γ≈120°; rhombohedral → α=β=γ≠90°."
+    "Chemistry mode: α_i = r_metal + r_anion (Å). Override any metal radius if needed. "
+    "Radii are used as ratios (s rescales globally). Engine uses minimal-image+KDTree."
 )
