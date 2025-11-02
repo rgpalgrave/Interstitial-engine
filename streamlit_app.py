@@ -1,7 +1,7 @@
 # =====================================================
 # streamlit_app.py
 # Interstitial-site finder — fast pair-circle engine
-# (UI with param scan; uses cached engine)
+# (UI with param scan; supports up to 6 sublattices)
 # =====================================================
 
 import streamlit as st
@@ -39,9 +39,9 @@ tol_inside = st.sidebar.number_input("Inside tolerance", 0.0, 0.02, 0.001, 0.000
 cluster_eps = st.sidebar.number_input("Cluster radius (×a)", 0.01, 0.5, 0.1, 0.01)
 
 # -------------------------------
-# Sublattices
+# Sublattices (up to 6)
 # -------------------------------
-st.subheader("Sublattices (1–3)")
+st.subheader("Sublattices (1–6)")
 
 bravais_choices = [
     # Cubic
@@ -59,20 +59,29 @@ bravais_choices = [
 ]
 
 def edit_sublattice(idx: int) -> Sublattice:
-    cols = st.columns(3)
-    with cols[0]:
-        bravais = st.selectbox(f"Bravais {idx}", bravais_choices, index=2 if idx == 1 else 0, key=f"brv{idx}")
-        alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"ar{idx}")
-        enabled = st.checkbox(f"Enable {idx}", value=True, key=f"vis{idx}")
-    with cols[1]:
-        offx = st.number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"ox{idx}")
-        offy = st.number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oy{idx}")
-        offz = st.number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oz{idx}")
-    with cols[2]:
-        name = st.text_input(f"Name {idx}", f"Sub{idx}", key=f"name{idx}")
-    return Sublattice(name=name, bravais=bravais, offset_frac=(offx, offy, offz), alpha_ratio=alpha_ratio, visible=enabled)
+    with st.expander(f"Sublattice {idx} settings", expanded=(idx <= 3)):
+        cols = st.columns(3)
+        with cols[0]:
+            bravais = st.selectbox(
+                f"Bravais {idx}", bravais_choices, index=2 if idx == 1 else 0, key=f"brv{idx}"
+            )
+            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"ar{idx}")
+            enabled = st.checkbox(f"Enable {idx}", value=True, key=f"vis{idx}")
+        with cols[1]:
+            offx = st.number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"ox{idx}")
+            offy = st.number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oy{idx}")
+            offz = st.number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oz{idx}")
+        with cols[2]:
+            name = st.text_input(f"Name {idx}", f"Sub{idx}", key=f"name{idx}")
+    return Sublattice(
+        name=name,
+        bravais=bravais,
+        offset_frac=(offx, offy, offz),
+        alpha_ratio=alpha_ratio,
+        visible=enabled,
+    )
 
-n_sub = st.slider("Number of sublattices", 1, 3, 1)
+n_sub = st.slider("Number of sublattices", 1, 6, 1)   # <-- now up to 6
 subs: List[Sublattice] = [edit_sublattice(i + 1) for i in range(n_sub)]
 
 p = LatticeParams(a=a, b_ratio=b_ratio, c_ratio=c_ratio, alpha=alpha, beta=beta, gamma=gamma)
@@ -106,7 +115,7 @@ with colB:
         s_star, milestones = find_threshold_s_for_N(
             N_target, subs, p, repeat,
             s_min=s_min, s_max=s_max,
-            k_samples_coarse=k_coarse, k_samples_fine=k_fine,  # <-- FIX
+            k_samples_coarse=k_coarse, k_samples_fine=k_fine,
             tol_inside=tol_inside,
             cluster_eps=cluster_eps * a
         )
@@ -156,7 +165,7 @@ if st.button("Run scan"):
             s_star, _ = find_threshold_s_for_N(
                 N, subs, p_i, repeat,
                 s_min=srange_min, s_max=srange_max,
-                k_samples_coarse=k_coarse, k_samples_fine=k_fine,  # <-- FIX
+                k_samples_coarse=k_coarse, k_samples_fine=k_fine,
                 tol_inside=tol_inside,
                 cluster_eps=cluster_eps * p_i.a,
                 max_iter=24
@@ -174,6 +183,6 @@ if st.button("Run scan"):
     st.pyplot(fig, clear_figure=True)
 
 st.caption(
-    "Radii are r_i = α_i · s · a. Engine caches geometry & neighbor buckets, uses early-stop and "
-    "adaptive sampling, and bisects to find s*_N. Tip: hexagonal → γ≈120°; rhombohedral → α=β=γ≠90°."
+    "Radii are r_i = α_i · s · a. Engine caches geometry & uses minimal-image + KDTree counting. "
+    "Tip: hexagonal → γ≈120°; rhombohedral → α=β=γ≠90°."
 )
