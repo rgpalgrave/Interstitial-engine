@@ -1,26 +1,28 @@
 # =====================================================
 # streamlit_app.py
 # Interstitial-site finder — fast pair-circle engine
-# (UI with chemistry mode: α_i = r_metal + r_anion)
+# + Chemistry mode + 3D Unit Cell Visualiser (Plotly)
 # =====================================================
 
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Dict
+import plotly.graph_objects as go
+from typing import List, Dict, Tuple
 
 from interstitial_engine import (
     LatticeParams,
     Sublattice,
     max_multiplicity_for_scale,
     find_threshold_s_for_N,
+    lattice_vectors,         # reuse engine geometry
+    bravais_basis,
+    frac_to_cart,
 )
 
 # -------------------------------
-# Chemistry radii database (VI-coordination, ~Shannon-like)
-# Units: Å. One representative ionic radius per cation charge.
+# Chemistry radii database (VI-coordination, ~Shannon-like; Å)
 # -------------------------------
-
 ANION_RADII: Dict[str, float] = {
     "O": 1.38, "S": 1.84, "Se": 1.98, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20,
 }
@@ -127,8 +129,8 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
                 el = st.selectbox(f"Metal {idx}", elements, index=elements.index(default_el), key=f"el{idx}")
                 ox_map = get_metal_radii_options(el)
                 ox_states = sorted(ox_map.keys())
-                ox = st.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"oxid{idx}")  # <-- UNIQUE KEY
-                r_metal_default = ox_map.get(ox, None)
+                oxid = st.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"oxid{idx}")
+                r_metal_default = ox_map.get(oxid, None)
             with c2:
                 r_override = st.number_input(
                     f"Manual metal radius {idx} (Å, optional)", 0.0, 3.0,
@@ -139,9 +141,9 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
 
             r_metal = float(r_override) if use_override else float(r_metal_default if r_metal_default else 0.0)
             alpha_ratio = r_metal + r_anion
-            st.caption(f"Computed α_{idx} = r_metal ({r_metal:.3f}) + r_{anion} ({r_anion:.3f}) = {alpha_ratio:.3f} Å")
+            st.caption(f"α_{idx} = r_metal ({r_metal:.3f}) + r_{anion} ({r_anion:.3f}) = {alpha_ratio:.3f} Å")
         else:
-            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"alpha{idx}")
+            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 5.0, 1.0, 0.01, key=f"alpha{idx}")
 
     return Sublattice(
         name=name,
@@ -256,3 +258,140 @@ st.caption(
     "Chemistry mode: α_i = r_metal + r_anion (Å). Override any metal radius if needed. "
     "Radii are used as ratios (s rescales globally). Engine uses minimal-image + KDTree."
 )
+
+# =====================================================
+# 3D UNIT CELL VIEW (Plotly): on-demand rendering
+# =====================================================
+st.divider()
+st.subheader("3D Unit Cell Visualiser")
+
+colv = st.columns(4)
+with colv[0]:
+    vis_s = st.number_input("Visualise at s", 0.0, 5.0, max(0.001, s_test if 's_test' in locals() else 0.35), 0.001, key="vis_s")
+with colv[1]:
+    show_mult = st.number_input("Show intersections with multiplicity N =", 2, 24, value=4, step=1)
+with colv[2]:
+    marker_size = st.slider("Marker size (Å)", 0.05, 0.5, 0.15, 0.01)
+with colv[3]:
+    draw_btn = st.button("Render unit cell view")
+
+def _cell_corners_and_edges(a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int,int]]]:
+    # 8 corners in fractional coords
+    fracs = np.array([
+        [0,0,0],[1,0,0],[0,1,0],[0,0,1],
+        [1,1,0],[1,0,1],[0,1,1],[1,1,1]
+    ], float)
+    M = np.vstack([a_vec, b_vec, c_vec]).T  # 3x3
+    corners = (fracs @ M.T)
+    # edges as pairs of corner indices
+    idx = {
+        (0,1),(0,2),(0,3),
+        (1,4),(1,5),
+        (2,4),(2,6),
+        (3,5),(3,6),
+        (4,7),(5,7),(6,7)
+    }
+    edges = list(idx)
+    return corners, edges
+
+def _points_for_sublattice(sub: Sublattice, p: LatticeParams) -> np.ndarray:
+    a_vec, b_vec, c_vec = lattice_vectors(p)
+    basis = bravais_basis(sub.bravais)
+    off = np.array(sub.offset_frac, float)
+    pts = []
+    for b in basis:
+        frac = np.asarray(b) + off
+        # keep only those within [0,1) in fractional, with tiny tolerance
+        f_mod = np.mod(frac, 1.0)
+        cart = frac_to_cart(f_mod, a_vec, b_vec, c_vec)
+        pts.append(cart)
+    return np.asarray(pts)
+
+def _cart_to_frac(cart: np.ndarray, a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> np.ndarray:
+    M = np.vstack([a_vec, b_vec, c_vec]).T  # 3x3
+    return np.linalg.solve(M, cart.T).T
+
+if draw_btn:
+    a_vec, b_vec, c_vec = lattice_vectors(p)
+    # Lattice points per enabled sublattice
+    sub_pts = []
+    for i, sub in enumerate(subs):
+        if not sub.visible:
+            continue
+        pts = _points_for_sublattice(sub, p)
+        sub_pts.append((sub.name, pts))
+    # Intersections at chosen multiplicity (compute all >=2, cluster already done in engine)
+    m_all, reps, repc = max_multiplicity_for_scale(
+        subs, p, repeat, vis_s,
+        k_samples=k_fine,
+        tol_inside=tol_inside,
+        cluster_eps=cluster_eps * a,
+        early_stop_at=None
+    )
+    # Filter reps to those inside the central cell and with exact multiplicity = show_mult
+    # Use fractional coords test (0..1 with small tol)
+    tol_frac = 1e-6
+    rep_list = []
+    for pt, cnt in zip(reps, repc):
+        if int(cnt) != int(show_mult):
+            continue
+        f = _cart_to_frac(np.asarray(pt), a_vec, b_vec, c_vec)
+        if np.all(f >= -tol_frac) and np.all(f <= 1.0 + tol_frac):
+            rep_list.append(pt)
+    rep_arr = np.asarray(rep_list) if rep_list else np.empty((0,3))
+
+    # ---- Build Plotly figure ----
+    fig = go.Figure()
+
+    # Unit cell edges
+    corners, edges = _cell_corners_and_edges(a_vec, b_vec, c_vec)
+    for i,j in edges:
+        fig.add_trace(go.Scatter3d(
+            x=[corners[i,0], corners[j,0]],
+            y=[corners[i,1], corners[j,1]],
+            z=[corners[i,2], corners[j,2]],
+            mode="lines",
+            line=dict(width=4),
+            showlegend=False
+        ))
+
+    # Sublattice points
+    palette = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
+    for idx, (name, pts) in enumerate(sub_pts):
+        if len(pts)==0: 
+            continue
+        fig.add_trace(go.Scatter3d(
+            x=pts[:,0], y=pts[:,1], z=pts[:,2],
+            mode="markers",
+            marker=dict(size=6, opacity=0.9),
+            name=f"{name} sites",
+            marker_symbol="circle",
+            legendgroup=f"sub{idx}",
+            marker_color=palette[idx % len(palette)],
+        ))
+
+    # Intersections (order N)
+    if rep_arr.size:
+        fig.add_trace(go.Scatter3d(
+            x=rep_arr[:,0], y=rep_arr[:,1], z=rep_arr[:,2],
+            mode="markers",
+            marker=dict(size=max(2, int( marker_size / max(1e-9, a) * 30 )), opacity=0.95),
+            name=f"Intersections N={show_mult}",
+            marker_symbol="diamond"
+        ))
+    else:
+        st.info("No intersections of the selected multiplicity in the central unit cell at this s (after clustering).")
+
+    fig.update_scenes(aspectmode="data")
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="x (Å)", yaxis_title="y (Å)", zaxis_title="z (Å)",
+            xaxis=dict(showbackground=False), yaxis=dict(showbackground=False), zaxis=dict(showbackground=False),
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=700,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# EOF
