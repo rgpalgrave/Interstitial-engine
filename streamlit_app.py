@@ -19,35 +19,21 @@ from interstitial_engine import (
 # -------------------------------
 # Chemistry radii database (VI-coordination, ~Shannon-like)
 # Units: Å. One representative ionic radius per cation charge.
-# These are "good-enough" defaults; override per-sublattice if needed.
 # -------------------------------
 
 ANION_RADII: Dict[str, float] = {
-    # Common single-anion choices (approx VI)
-    "O": 1.38,   # O2-
-    "S": 1.84,   # S2-
-    "Se": 1.98,  # Se2-
-    "F": 1.33,   # F-
-    "Cl": 1.81,  # Cl-
-    "Br": 1.96,  # Br-
-    "I": 2.20,   # I-
+    "O": 1.38, "S": 1.84, "Se": 1.98, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20,
 }
 
-# Metals: element -> {oxidation: radius (Å) }, VI-coordination representatives
 METAL_RADII: Dict[str, Dict[int, float]] = {
-    # Alkali
     "Li": {1: 0.76}, "Na": {1: 1.02}, "K": {1: 1.38}, "Rb": {1: 1.52}, "Cs": {1: 1.67},
-    # Alkaline earth
     "Be": {2: 0.59}, "Mg": {2: 0.72}, "Ca": {2: 1.00}, "Sr": {2: 1.18}, "Ba": {2: 1.35},
-    # Group 13/14
     "Al": {3: 0.535}, "Ga": {3: 0.62}, "In": {3: 0.80}, "Tl": {1: 1.59, 3: 0.885},
     "Si": {4: 0.40}, "Ge": {4: 0.53}, "Sn": {2: 1.18, 4: 0.69}, "Pb": {2: 1.19, 4: 0.775},
-    # Early TM / tetravalent cations
     "Ti": {3: 0.67, 4: 0.605}, "Zr": {4: 0.72}, "Hf": {4: 0.71},
     "V": {2: 0.79, 3: 0.64, 4: 0.58, 5: 0.54},
     "Nb": {5: 0.64}, "Ta": {5: 0.64},
     "Mo": {4: 0.65, 5: 0.61, 6: 0.59}, "W": {4: 0.66, 5: 0.62, 6: 0.60},
-    # 3d TMs (HS where relevant, VI)
     "Sc": {3: 0.745}, "Y": {3: 0.90},
     "Cr": {2: 0.80, 3: 0.615, 6: 0.52},
     "Mn": {2: 0.83, 3: 0.645, 4: 0.67},
@@ -55,20 +41,15 @@ METAL_RADII: Dict[str, Dict[int, float]] = {
     "Co": {2: 0.745, 3: 0.61},
     "Ni": {2: 0.69, 3: 0.56},
     "Cu": {1: 0.91, 2: 0.73}, "Zn": {2: 0.74},
-    # Post-TM
     "Cd": {2: 0.95}, "Hg": {2: 1.16},
-    # 4d/5d miscellany
     "Ru": {3: 0.68, 4: 0.62}, "Rh": {3: 0.665, 4: 0.60}, "Pd": {2: 0.86, 4: 0.615},
     "Ag": {1: 1.15}, "Au": {1: 1.37, 3: 0.85},
     "Pt": {2: 0.80, 4: 0.625},
-    # Rare earths (Ln3+, VI)
     "La": {3: 1.032}, "Ce": {3: 1.01, 4: 0.87}, "Pr": {3: 0.99}, "Nd": {3: 0.983},
     "Sm": {3: 0.958}, "Eu": {2: 1.25, 3: 0.947}, "Gd": {3: 0.938}, "Tb": {3: 0.923},
     "Dy": {3: 0.912}, "Ho": {3: 0.901}, "Er": {3: 0.89}, "Tm": {3: 0.88},
     "Yb": {2: 1.16, 3: 0.868}, "Lu": {3: 0.861},
-    # Others commonly used
     "B": {3: 0.27}, "P": {5: 0.52}, "As": {5: 0.60}, "Sb": {5: 0.74}, "Bi": {3: 1.03, 5: 0.76},
-    "Ti": {4: 0.605}, "Ta": {5: 0.64}, "Nb": {5: 0.64},
 }
 
 def norm_el(sym: str) -> str:
@@ -113,17 +94,11 @@ anion = st.selectbox("Global anion", list(ANION_RADII.keys()), index=list(ANION_
 r_anion = ANION_RADII[anion]
 
 bravais_choices = [
-    # Cubic
     "cubic_P","cubic_I","cubic_F","cubic_Diamond","cubic_Pyrochlore",
-    # Tetragonal
     "tetragonal_P","tetragonal_I",
-    # Orthorhombic
     "orthorhombic_P","orthorhombic_C","orthorhombic_I","orthorhombic_F",
-    # Hexagonal
     "hexagonal_P","hexagonal_HCP",
-    # Rhombohedral
     "rhombohedral_R",
-    # Lower symmetry
     "monoclinic_P","monoclinic_C","triclinic_P",
 ]
 
@@ -137,9 +112,9 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
             enabled = st.checkbox(f"Enable {idx}", value=True, key=f"vis{idx}")
 
         with cols[1]:
-            offx = st.number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"ox{idx}")
-            offy = st.number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oy{idx}")
-            offz = st.number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"oz{idx}")
+            offx = st.number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offx{idx}")
+            offy = st.number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offy{idx}")
+            offz = st.number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offz{idx}")
 
         with cols[2]:
             name = st.text_input(f"Name {idx}", f"Sub{idx}", key=f"name{idx}")
@@ -147,13 +122,12 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
         if use_chem:
             c1, c2 = st.columns(2)
             with c1:
-                # Metal picker
                 elements = sorted(METAL_RADII.keys())
                 default_el = "Fe" if idx == 1 else elements[0]
                 el = st.selectbox(f"Metal {idx}", elements, index=elements.index(default_el), key=f"el{idx}")
                 ox_map = get_metal_radii_options(el)
                 ox_states = sorted(ox_map.keys())
-                ox = st.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"ox{idx}")
+                ox = st.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"oxid{idx}")  # <-- UNIQUE KEY
                 r_metal_default = ox_map.get(ox, None)
             with c2:
                 r_override = st.number_input(
@@ -167,7 +141,7 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
             alpha_ratio = r_metal + r_anion
             st.caption(f"Computed α_{idx} = r_metal ({r_metal:.3f}) + r_{anion} ({r_anion:.3f}) = {alpha_ratio:.3f} Å")
         else:
-            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"ar{idx}")
+            alpha_ratio = st.number_input(f"α ratio {idx}", 0.01, 3.0, 1.0, 0.01, key=f"alpha{idx}")
 
     return Sublattice(
         name=name,
@@ -195,7 +169,7 @@ with colA:
     if st.button("Compute k_max(s)"):
         m, reps, repc = max_multiplicity_for_scale(
             subs, p, repeat, s_test,
-            k_samples=k_fine,  # single eval: use fine
+            k_samples=k_fine,
             tol_inside=tol_inside,
             cluster_eps=cluster_eps * a,
             early_stop_at=None
@@ -280,5 +254,5 @@ if st.button("Run scan"):
 
 st.caption(
     "Chemistry mode: α_i = r_metal + r_anion (Å). Override any metal radius if needed. "
-    "Radii are used as ratios (s rescales globally). Engine uses minimal-image+KDTree."
+    "Radii are used as ratios (s rescales globally). Engine uses minimal-image + KDTree."
 )
