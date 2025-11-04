@@ -1,15 +1,18 @@
 # =====================================================
 # streamlit_app.py
 # Interstitial-site finder — fast pair-circle engine
-# Chemistry mode + 3D unit cell + radius-ratio scans
-# Global lattice + Wyckoff-like site presets per sublattice
+# - Chemistry mode
+# - Global lattice (shared) + Wyckoff-like site presets
+# - Radius-ratio scans (global or per-sublattice)
+# - 3D unit cell visualiser (Plotly)
+# - Coordination numbers (representative site per sublattice)
 # =====================================================
 
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple
 
 from interstitial_engine import (
     LatticeParams,
@@ -19,6 +22,7 @@ from interstitial_engine import (
     lattice_vectors,
     bravais_basis,
     frac_to_cart,
+    compute_cn_representative,
 )
 
 # -------------------------------
@@ -27,6 +31,7 @@ from interstitial_engine import (
 ANION_RADII: Dict[str, float] = {
     "O": 1.38, "S": 1.84, "Se": 1.98, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20,
 }
+
 METAL_RADII: Dict[str, Dict[int, float]] = {
     "Li": {1: 0.76}, "Na": {1: 1.02}, "K": {1: 1.38}, "Rb": {1: 1.52}, "Cs": {1: 1.67},
     "Be": {2: 0.59}, "Mg": {2: 0.72}, "Ca": {2: 1.00}, "Sr": {2: 1.18}, "Ba": {2: 1.35},
@@ -54,128 +59,111 @@ METAL_RADII: Dict[str, Dict[int, float]] = {
     "B": {3: 0.27}, "P": {5: 0.52}, "As": {5: 0.60}, "Sb": {5: 0.74}, "Bi": {3: 1.03, 5: 0.76},
 }
 
+# -------------------------------
+# Wyckoff-like presets per global lattice
+# -------------------------------
+Wyck = {
+    "cubic_P": {
+        "1a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "1b (1/2,1/2,1/2)": {"type":"fixed","xyz":(0.5,0.5,0.5)},
+        "3c (0,1/2,1/2)": {"type":"fixed","xyz":(0.0,0.5,0.5)},
+        "3d (1/2,0,0)": {"type":"fixed","xyz":(0.5,0.0,0.0)},
+        "6e (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+    },
+    "cubic_F": {
+        "4a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "4b (1/2,1/2,1/2)": {"type":"fixed","xyz":(0.5,0.5,0.5)},
+        "8c (1/4,1/4,1/4)": {"type":"fixed","xyz":(0.25,0.25,0.25)},
+        "24d (0,1/4,1/4)": {"type":"fixed","xyz":(0.0,0.25,0.25)},
+        "24e (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+        "32f (x,x,x)": {"type":"free","xyz":("x","x","x")},
+    },
+    "cubic_I": {
+        "2a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "2b (1/2,1/2,1/2)": {"type":"fixed","xyz":(0.5,0.5,0.5)},
+        "6c (0,1/2,0)": {"type":"fixed","xyz":(0.0,0.5,0.0)},
+        "6d (1/2,0,0)": {"type":"fixed","xyz":(0.5,0.0,0.0)},
+        "12e (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+    },
+    "tetragonal_P": {
+        "1a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "1b (0,0,1/2)": {"type":"fixed","xyz":(0.0,0.0,0.5)},
+        "1c (1/2,1/2,0)": {"type":"fixed","xyz":(0.5,0.5,0.0)},
+        "1d (1/2,1/2,1/2)": {"type":"fixed","xyz":(0.5,0.5,0.5)},
+        "2i (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+        "2j (x,x,0)": {"type":"free","xyz":("x","x",0.0)},
+        "2k (x,x,z)": {"type":"free","xyz":("x","x","z")},
+    },
+    "tetragonal_I": {
+        "2a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "2b (0,0,1/2)": {"type":"fixed","xyz":(0.0,0.0,0.5)},
+        "4d (0,1/2,1/4)": {"type":"fixed","xyz":(0.0,0.5,0.25)},
+        "4e (0,0,z)": {"type":"free","xyz":(0.0,0.0,"z")},
+        "8g (0,1/2,z)": {"type":"free","xyz":(0.0,0.5,"z")},
+    },
+    "orthorhombic_P": {
+        "1a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "1b (0,0,1/2)": {"type":"fixed","xyz":(0.0,0.0,0.5)},
+        "1c (0,1/2,0)": {"type":"fixed","xyz":(0.0,0.5,0.0)},
+        "1d (1/2,0,0)": {"type":"fixed","xyz":(0.5,0.0,0.0)},
+        "2e (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+        "2f (0,y,0)": {"type":"free","xyz":(0.0,"y",0.0)},
+        "2g (0,0,z)": {"type":"free","xyz":(0.0,0.0,"z")},
+    },
+    "orthorhombic_C": {
+        "2a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "2b (0,1/2,0)": {"type":"fixed","xyz":(0.0,0.5,0.0)},
+        "4g (0,y,0)": {"type":"free","xyz":(0.0,"y",0.0)},
+    },
+    "orthorhombic_I": {
+        "2a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "2b (1/2,1/2,1/2)": {"type":"fixed","xyz":(0.5,0.5,0.5)},
+        "4e (0,0,z)": {"type":"free","xyz":(0.0,0.0,"z")},
+    },
+    "orthorhombic_F": {
+        "4a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "4b (1/2,1/2,1/2)": {"type":"fixed","xyz":(0.5,0.5,0.5)},
+        "8f (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+    },
+    "hexagonal_P": {
+        "1a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "1b (0,0,1/2)": {"type":"fixed","xyz":(0.0,0.0,0.5)},
+        "2c (1/3,2/3,0)": {"type":"fixed","xyz":(1/3,2/3,0.0)},
+        "2d (1/3,2/3,1/2)": {"type":"fixed","xyz":(1/3,2/3,0.5)},
+        "2e (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+        "2f (x,x,0)": {"type":"free","xyz":("x","x",0.0)},
+        "2g (x,x,z)": {"type":"free","xyz":("x","x","z")},
+    },
+    "hexagonal_HCP": {
+        "2a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "2b (0,0,1/4)": {"type":"fixed","xyz":(0.0,0.0,0.25)},
+        "2c (1/3,2/3,1/4)": {"type":"fixed","xyz":(1/3,2/3,0.25)},
+        "2d (1/3,2/3,3/4)": {"type":"fixed","xyz":(1/3,2/3,0.75)},
+        "4f (1/3,2/3,z)": {"type":"free","xyz":(1/3,2/3,"z")},
+    },
+    "rhombohedral_R": {
+        "3a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "3b (0,0,1/2)": {"type":"fixed","xyz":(0.0,0.0,0.5)},
+        "6c (0,0,z)": {"type":"free","xyz":(0.0,0.0,"z")},
+    },
+    "monoclinic_P": {
+        "1a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "2e (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+    },
+    "monoclinic_C": {
+        "2a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "4i (x,0,0)": {"type":"free","xyz":("x",0.0,0.0)},
+    },
+    "triclinic_P": {
+        "1a (0,0,0)": {"type":"fixed","xyz":(0.0,0.0,0.0)},
+        "1b (x,y,z)": {"type":"free","xyz":("x","y","z")},
+    },
+}
+
 def norm_el(sym: str) -> str:
     sym = sym.strip()
     return sym[0].upper() + sym[1:].lower() if sym else sym
 
-# -------------------------------
-# Wyckoff-like presets per global lattice
-# Each entry: label -> {"type": "fixed", "xyz": (fx,fy,fz)}
-#           or label -> {"type": "free",  "xyz": ("x",0,"z")}  # names of free params
-# Values are fractional coords in the conventional cell.
-# -------------------------------
-Wyck = {
-    # Cubic Pm-3m (221)
-    "cubic_P": {
-        "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "1b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
-        "3c (0,1/2,1/2)":      {"type": "fixed", "xyz": (0.0, 0.5, 0.5)},
-        "3d (1/2,0,0)":        {"type": "fixed", "xyz": (0.5, 0.0, 0.0)},
-        "6e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-    },
-    # Cubic Fm-3m (225)
-    "cubic_F": {
-        "4a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "4b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
-        "8c (1/4,1/4,1/4)":    {"type": "fixed", "xyz": (0.25,0.25,0.25)},
-        "24d (0,1/4,1/4)":     {"type": "fixed", "xyz": (0.0, 0.25,0.25)},
-        "24e (x,0,0)":         {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-        "32f (x,x,x)":         {"type": "free",  "xyz": ("x","x","x")},
-    },
-    # Cubic Im-3m (229)
-    "cubic_I": {
-        "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "2b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
-        "6c (0,1/2,0)":        {"type": "fixed", "xyz": (0.0, 0.5, 0.0)},
-        "6d (1/2,0,0)":        {"type": "fixed", "xyz": (0.5, 0.0, 0.0)},
-        "12e (x,0,0)":         {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-    },
-    # Tetragonal P4/mmm (123)
-    "tetragonal_P": {
-        "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "1b (0,0,1/2)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.5)},
-        "1c (1/2,1/2,0)":      {"type": "fixed", "xyz": (0.5, 0.5, 0.0)},
-        "1d (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
-        "2e (0,1/2,0)":        {"type": "fixed", "xyz": (0.0, 0.5, 0.0)},
-        "2f (0,1/2,1/2)":      {"type": "fixed", "xyz": (0.0, 0.5, 0.5)},
-        "2g (1/2,0,0)":        {"type": "fixed", "xyz": (0.5, 0.0, 0.0)},
-        "2h (1/2,0,1/2)":      {"type": "fixed", "xyz": (0.5, 0.0, 0.5)},
-        "2i (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-        "2j (x,x,0)":          {"type": "free",  "xyz": ("x","x",0.0)},
-        "2k (x,x,z)":          {"type": "free",  "xyz": ("x","x","z")},
-    },
-    # Tetragonal I4/mmm (139)
-    "tetragonal_I": {
-        "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "2b (0,0,1/2)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.5)},
-        "4d (0,1/2,1/4)":      {"type": "fixed", "xyz": (0.0, 0.5, 0.25)},
-        "4e (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0,"z")},
-        "8g (0,1/2,z)":        {"type": "free",  "xyz": (0.0, 0.5,"z")},
-    },
-    # Orthorhombic Pmmm (47)
-    "orthorhombic_P": {
-        "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "1b (0,0,1/2)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.5)},
-        "1c (0,1/2,0)":        {"type": "fixed", "xyz": (0.0, 0.5, 0.0)},
-        "1d (1/2,0,0)":        {"type": "fixed", "xyz": (0.5, 0.0, 0.0)},
-        "2e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-        "2f (0,y,0)":          {"type": "free",  "xyz": (0.0,"y", 0.0)},
-        "2g (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0,"z")},
-    },
-    # Orthorhombic Cmmm / Immm / Fmmm (minimal set of special points)
-    "orthorhombic_C": {
-        "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "2b (0,1/2,0)":        {"type": "fixed", "xyz": (0.0, 0.5, 0.0)},
-        "4g (0,y,0)":          {"type": "free",  "xyz": (0.0,"y", 0.0)},
-    },
-    "orthorhombic_I": {
-        "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "2b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
-        "4e (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0,"z")},
-    },
-    "orthorhombic_F": {
-        "4a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "4b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
-        "8f (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-    },
-    # Hexagonal P6/mmm (191)
-    "hexagonal_P": {
-        "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "1b (0,0,1/2)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.5)},
-        "2c (1/3,2/3,0)":      {"type": "fixed", "xyz": (1/3, 2/3, 0.0)},
-        "2d (1/3,2/3,1/2)":    {"type": "fixed", "xyz": (1/3, 2/3, 0.5)},
-        "2e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-        "2f (x,x,0)":          {"type": "free",  "xyz": ("x","x", 0.0)},
-        "2g (x,x,z)":          {"type": "free",  "xyz": ("x","x","z")},
-    },
-    # Hexagonal P63/mmc (194) — HCP
-    "hexagonal_HCP": {
-        "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "2b (0,0,1/4)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.25)},
-        "2c (1/3,2/3,1/4)":    {"type": "fixed", "xyz": (1/3, 2/3, 0.25)},
-        "2d (1/3,2/3,3/4)":    {"type": "fixed", "xyz": (1/3, 2/3, 0.75)},
-        "4f (1/3,2/3,z)":      {"type": "free",  "xyz": (1/3, 2/3, "z")},
-    },
-    # Rhombohedral R-3m (166)
-    "rhombohedral_R": {
-        "3a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "3b (0,0,1/2)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.5)},
-        "6c (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0, "z")},
-    },
-    # Monoclinic / Triclinic — include only "corner" + a simple line
-    "monoclinic_P": {
-        "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "2e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-    },
-    "monoclinic_C": {
-        "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "4i (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
-    },
-    "triclinic_P": {
-        "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
-        "1b (x,y,z)":          {"type": "free",  "xyz": ("x","y","z")},
-    },
-}
 
 # -------------------------------
 # Streamlit setup
@@ -188,8 +176,9 @@ st.title("Interstitial-site finder — fast pair-circle engine (Streamlit)")
 # -------------------------------
 st.sidebar.header("Global lattice")
 global_bravais_choices = list(Wyck.keys())
-global_bravais = st.sidebar.selectbox("Bravais / Space-group family", global_bravais_choices, index=global_bravais_choices.index("cubic_F"))
-a = st.sidebar.number_input("a (lattice unit, Å)", 0.1, 10.0, 1.0, 0.01)
+global_bravais = st.sidebar.selectbox("Bravais / Space-group family", global_bravais_choices,
+                                      index=global_bravais_choices.index("cubic_F"))
+a = st.sidebar.number_input("a (Å)", 0.1, 10.0, 1.0, 0.01)
 b_ratio = st.sidebar.number_input("b/a", 0.1, 5.0, 1.0, 0.01)
 c_ratio = st.sidebar.number_input("c/a", 0.1, 5.0, 1.0, 0.01)
 alpha = st.sidebar.number_input("α (deg)", 10.0, 170.0, 90.0, 0.1)
@@ -214,11 +203,9 @@ r_anion = ANION_RADII[anion]
 
 def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
     with st.expander(f"Sublattice {idx} settings", expanded=(idx <= 3)):
-        # Wyckoff-like site picker for the selected global bravais
         wyck_labels = ["Free position"] + list(Wyck[global_bravais].keys())
         choice = st.selectbox(f"Site {idx}", wyck_labels, index=0, key=f"site{idx}")
 
-        # offsets come from either free position or from the selected preset (with optional free params)
         offx = offy = offz = 0.0
         if choice == "Free position":
             ccols = st.columns(3)
@@ -231,9 +218,8 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
         else:
             spec = Wyck[global_bravais][choice]
             xyz = spec["xyz"]
-            # Collect free parameters if present
             def val_or_input(val, axis):
-                if isinstance(val, str):  # "x", "y", or "z"
+                if isinstance(val, str):
                     return st.number_input(f"{choice}: {val} {idx}", 0.0, 1.0, 0.25, 0.005, key=f"{val}{idx}_{choice}")
                 else:
                     return float(val)
@@ -245,7 +231,6 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
         name = st.text_input(f"Name {idx}", f"Sub{idx}", key=f"name{idx}")
         enabled = st.checkbox(f"Enable {idx}", value=True, key=f"vis{idx}")
 
-        # Chemistry / α ratio
         if use_chem:
             c1, c2 = st.columns(2)
             with c1:
@@ -258,8 +243,7 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
             with c2:
                 r_override = st.number_input(
                     f"Manual metal radius {idx} (Å, optional)", 0.0, 3.0,
-                    value=float(r_metal_default),
-                    step=0.01, key=f"rman{idx}"
+                    value=float(r_metal_default), step=0.01, key=f"rman{idx}"
                 )
                 use_override = st.checkbox(f"Use manual metal radius {idx}", value=False, key=f"useman{idx}")
 
@@ -271,7 +255,7 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
 
     return Sublattice(
         name=name,
-        bravais=global_bravais,             # <-- all share the global lattice type
+        bravais=global_bravais,  # all share the global lattice type
         offset_frac=(offx, offy, offz),
         alpha_ratio=alpha_ratio,
         visible=enabled,
@@ -280,7 +264,7 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
 n_sub = st.slider("Number of sublattices", 1, 6, 1)
 subs: List[Sublattice] = [edit_sublattice(i + 1, chem_mode) for i in range(n_sub)]
 
-# Lattice parameters object (shared)
+# Shared lattice parameters
 p = LatticeParams(a=a, b_ratio=b_ratio, c_ratio=c_ratio, alpha=alpha, beta=beta, gamma=gamma)
 
 # -------------------------------
@@ -295,26 +279,23 @@ with colA:
     s_test = st.number_input("Evaluate at s", 0.0, 5.0, 0.35, 0.001)
     if st.button("Compute k_max(s)"):
         m, reps, repc = max_multiplicity_for_scale(
-            subs, p, repeat, s_test,
-            k_samples=k_fine,
-            tol_inside=tol_inside,
-            cluster_eps=cluster_eps * a,
-            early_stop_at=None
+            subs, p, repeat_ignored=1, scale_s=s_test,
+            k_samples=k_fine, tol_inside=tol_inside,
+            cluster_eps=cluster_eps * a, early_stop_at=None
         )
         st.success(f"k_max(s={s_test:.4f}) = {m}")
         st.caption(f"Hotspots (clustered): {len(reps)}")
 
 with colB:
-    N_target = st.slider("Target N", 2, 12, 4)
+    N_target = st.slider("Target N", 2, 24, 6)
     s_min = st.number_input("s_min", 0.0, 5.0, 0.01, 0.001)
     s_max = st.number_input("s_max", 0.0, 5.0, 0.9, 0.001)
     if st.button("Find s*_N (bisection)"):
         s_star, milestones = find_threshold_s_for_N(
-            N_target, subs, p, repeat,
+            N_target, subs, p, repeat_ignored=1,
             s_min=s_min, s_max=s_max,
             k_samples_coarse=k_coarse, k_samples_fine=k_fine,
-            tol_inside=tol_inside,
-            cluster_eps=cluster_eps * a
+            tol_inside=tol_inside, cluster_eps=cluster_eps * a
         )
         if s_star is None:
             st.error(f"Did not reach N={N_target} in [{s_min}, {s_max}].")
@@ -323,7 +304,7 @@ with colB:
             st.caption(f"Milestones seen (first s for each m): {milestones}")
 
 # -------------------------------
-# Parameter scan (incl. α scans)
+# Parameter scan (includes α scans)
 # -------------------------------
 st.divider()
 st.subheader("Parameter scan: min radii s*_N vs parameter")
@@ -355,11 +336,13 @@ def clone_params(base: LatticeParams, **kw) -> LatticeParams:
     d.update(kw)
     return LatticeParams(**d)
 
+from interstitial_engine import Sublattice as SL  # for constructing copies
+
 def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[Sublattice]:
     out: List[Sublattice] = []
     if mode == "alpha_scalar (all sublattices)":
         for s in subs_in:
-            out.append(Sublattice(s.name, s.bravais, s.offset_frac, alpha_ratio=s.alpha_ratio * val, visible=s.visible))
+            out.append(SL(s.name, s.bravais, s.offset_frac, alpha_ratio=s.alpha_ratio * val, visible=s.visible))
     elif mode.startswith("alpha(Sub"):
         try:
             idx = int(mode.split("Sub")[1].split(")")[0].strip()) - 1
@@ -367,9 +350,9 @@ def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[S
             idx = -1
         for i, s in enumerate(subs_in):
             new_alpha = s.alpha_ratio * val if i == idx else s.alpha_ratio
-            out.append(Sublattice(s.name, s.bravais, s.offset_frac, alpha_ratio=new_alpha, visible=s.visible))
+            out.append(SL(s.name, s.bravais, s.offset_frac, alpha_ratio=new_alpha, visible=s.visible))
     else:
-        out = [Sublattice(s.name, s.bravais, s.offset_frac, s.alpha_ratio, s.visible) for s in subs_in]
+        out = [SL(s.name, s.bravais, s.offset_frac, s.alpha_ratio, s.visible) for s in subs_in]
     return out
 
 if st.button("Run scan"):
@@ -389,11 +372,10 @@ if st.button("Run scan"):
 
         for N in Ns:
             s_star, _ = find_threshold_s_for_N(
-                N, subs_i, p_i, repeat,
+                N, subs_i, p_i, repeat_ignored=1,
                 s_min=srange_min, s_max=srange_max,
                 k_samples_coarse=k_coarse, k_samples_fine=k_fine,
-                tol_inside=tol_inside,
-                cluster_eps=cluster_eps * p_i.a,
+                tol_inside=tol_inside, cluster_eps=cluster_eps * p_i.a,
                 max_iter=24
             )
             curves[N][i] = s_star if s_star is not None else np.nan
@@ -409,13 +391,49 @@ if st.button("Run scan"):
     st.pyplot(fig, clear_figure=True)
 
 st.caption(
-    "Global lattice type/metrics apply to all sublattices. Each sublattice can be placed on a Wyckoff-like preset "
-    "for that lattice (with optional free parameters) or a free fractional offset. Chemistry mode sets α_i = r_metal + r_anion (Å)."
+    "Global lattice type/metrics apply to all sublattices. Wyckoff-like presets set fractional offsets; "
+    "Chemistry mode sets α_i = r_metal + r_anion (Å). Engine: pair-circle sampling + clustering."
 )
 
-# =====================================================
+# -------------------------------
+# Coordination numbers (representative site per sublattice)
+# -------------------------------
+st.divider()
+st.subheader("Coordination numbers (representative site per sublattice)")
+
+colc = st.columns(5)
+with colc[0]:
+    cn_s = st.number_input("Evaluate CN at s", 0.0, 5.0, 0.35, 0.001, key="cn_s")
+with colc[1]:
+    cn_k  = st.number_input("Multiplicity k", 2, 24, 6, step=1)
+with colc[2]:
+    cn_mode = st.selectbox("k mode", ["exact", "geq"], index=0)
+with colc[3]:
+    cn_samples = st.select_slider("Samples/circle", options=[6, 8, 12, 16, 24, 32], value=12)
+with colc[4]:
+    run_cn = st.button("Compute CNs")
+
+if run_cn:
+    import pandas as pd
+    rows = []
+    for i, sub in enumerate(subs):
+        if not sub.visible:
+            rows.append({"Sublattice": sub.name, "Bravais": sub.bravais, "Enabled": False, "α (Å)": round(sub.alpha_ratio, 4), "CN": None})
+            continue
+        cn_val = compute_cn_representative(
+            sublattices=subs, p=p, sub_index=i, scale_s=cn_s,
+            k_filter=int(cn_k), mode=cn_mode,
+            k_samples=int(cn_samples), tol_surface=tol_inside,
+            cluster_eps=cluster_eps * a
+        )
+        rows.append({"Sublattice": sub.name, "Bravais": sub.bravais, "Enabled": True, "α (Å)": round(sub.alpha_ratio, 4),
+                     f"CN_{cn_mode}(k={cn_k})": cn_val})
+    st.dataframe(pd.DataFrame(rows))
+    st.caption("By symmetry, one representative metal site per sublattice suffices.")
+
+# -------------------------------
 # 3D UNIT CELL VIEW (Plotly): on-demand rendering
-# =====================================================
+# -------------------------------
 st.divider()
 st.subheader("3D Unit Cell Visualiser")
 
@@ -429,7 +447,7 @@ with colv[2]:
 with colv[3]:
     draw_btn = st.button("Render unit cell view")
 
-def _cell_corners_and_edges(a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int,int]]]:
+def _cell_corners_and_edges(a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray):
     fracs = np.array([
         [0,0,0],[1,0,0],[0,1,0],[0,0,1],
         [1,1,0],[1,0,1],[0,1,1],[1,1,1]
@@ -457,10 +475,6 @@ def _points_for_sublattice(sub: Sublattice, p: LatticeParams) -> np.ndarray:
         pts.append(cart)
     return np.asarray(pts)
 
-def _cart_to_frac(cart: np.ndarray, a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> np.ndarray:
-    M = np.vstack([a_vec, b_vec, c_vec]).T
-    return np.linalg.solve(M, cart.T).T
-
 if draw_btn:
     a_vec, b_vec, c_vec = lattice_vectors(p)
     sub_pts = []
@@ -470,8 +484,9 @@ if draw_btn:
         pts = _points_for_sublattice(sub, p)
         sub_pts.append((sub.name, pts))
 
+    # compute hotspots at selected multiplicity
     m_all, reps, repc = max_multiplicity_for_scale(
-        subs, p, repeat, vis_s,
+        subs, p, repeat_ignored=1, scale_s=vis_s,
         k_samples=k_fine, tol_inside=tol_inside,
         cluster_eps=cluster_eps * a, early_stop_at=None
     )
@@ -497,7 +512,7 @@ if draw_btn:
 
     palette = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
     for idx, (name, pts) in enumerate(sub_pts):
-        if len(pts)==0: 
+        if len(pts)==0:
             continue
         fig.add_trace(go.Scatter3d(
             x=pts[:,0], y=pts[:,1], z=pts[:,2],
