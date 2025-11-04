@@ -1,7 +1,7 @@
 # =====================================================
 # streamlit_app.py
 # Interstitial-site finder — fast pair-circle engine
-# + Chemistry mode + 3D Unit Cell Visualiser (Plotly)
+# Chemistry mode + 3D unit cell + radius-ratio scans
 # =====================================================
 
 import streamlit as st
@@ -15,13 +15,13 @@ from interstitial_engine import (
     Sublattice,
     max_multiplicity_for_scale,
     find_threshold_s_for_N,
-    lattice_vectors,         # reuse engine geometry
+    lattice_vectors,
     bravais_basis,
     frac_to_cart,
 )
 
 # -------------------------------
-# Chemistry radii database (VI-coordination, ~Shannon-like; Å)
+# Chemistry radii database (Å)
 # -------------------------------
 ANION_RADII: Dict[str, float] = {
     "O": 1.38, "S": 1.84, "Se": 1.98, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20,
@@ -87,7 +87,7 @@ tol_inside = st.sidebar.number_input("Inside tolerance", 0.0, 0.02, 0.001, 0.000
 cluster_eps = st.sidebar.number_input("Cluster radius (×a)", 0.01, 0.5, 0.1, 0.01)
 
 # -------------------------------
-# Sublattices (up to 6) + Chemistry mode
+# Sublattices (1–6) + Chemistry mode
 # -------------------------------
 st.subheader("Sublattices (1–6)")
 
@@ -198,44 +198,80 @@ with colB:
             st.caption(f"Milestones seen (first s for each m): {milestones}")
 
 # -------------------------------
-# Parameter scan
+# Parameter scan (now includes α scans)
 # -------------------------------
 st.divider()
-st.subheader("Parameter scan: min radii s*_N vs structural parameter")
+st.subheader("Parameter scan: min radii s*_N vs parameter")
 
-param = st.selectbox("Parameter to scan", ["a", "b_ratio", "c_ratio", "alpha", "beta", "gamma"], index=2)
+# Build scan targets list
+struct_params = ["a", "b_ratio", "c_ratio", "alpha", "beta", "gamma"]
+alpha_targets = ["alpha_scalar (all sublattices)"] + [f"alpha(Sub {i+1})" for i in range(n_sub)]
+scan_target = st.selectbox("Parameter to scan", struct_params + alpha_targets, index=2)
 
-if param in ("b_ratio", "c_ratio"):
-    vmin_default, vmax_default = 0.5, 1.5
-elif param in ("alpha", "beta", "gamma"):
-    vmin_default, vmax_default = 60.0, 140.0
-else:
-    vmin_default, vmax_default = 0.5, 1.5
+# Defaults per target
+if scan_target in ("b_ratio", "c_ratio"):
+    vmin_default, vmax_default, label = 0.5, 1.5, scan_target
+elif scan_target in ("alpha", "beta", "gamma"):
+    vmin_default, vmax_default, label = 60.0, 140.0, scan_target + " (deg)"
+elif scan_target.startswith("alpha"):
+    vmin_default, vmax_default, label = 0.5, 2.0, scan_target
+else:  # "a"
+    vmin_default, vmax_default, label = 0.5, 1.5, "a (Å)"
 
-vmin = st.number_input("Param min", value=float(vmin_default))
-vmax = st.number_input("Param max", value=float(vmax_default))
+vmin = st.number_input("Scan min", value=float(vmin_default))
+vmax = st.number_input("Scan max", value=float(vmax_default))
 steps = st.slider("Steps", 5, 101, 25)
 Ns = [2, 3, 4, 5, 6]
 
 srange_min = st.number_input("s_min (radius scale)", 0.0, 5.0, 0.01, 0.001, key="smin_scan")
 srange_max = st.number_input("s_max (radius scale)", 0.0, 5.0, 0.9, 0.001, key="smax_scan")
 
+def clone_params(base: LatticeParams, **kw) -> LatticeParams:
+    d = dict(a=base.a, b_ratio=base.b_ratio, c_ratio=base.c_ratio,
+             alpha=base.alpha, beta=base.beta, gamma=base.gamma)
+    d.update(kw)
+    return LatticeParams(**d)
+
+def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[Sublattice]:
+    """Return a deep-ish copy with alpha_ratio modified according to scan mode."""
+    out: List[Sublattice] = []
+    if mode == "alpha_scalar (all sublattices)":
+        for s in subs_in:
+            out.append(Sublattice(s.name, s.bravais, s.offset_frac, alpha_ratio=s.alpha_ratio * val, visible=s.visible))
+    elif mode.startswith("alpha(Sub"):
+        # extract index
+        try:
+            idx = int(mode.split("Sub")[1].split(")")[0].strip()) - 1
+        except Exception:
+            idx = -1
+        for i, s in enumerate(subs_in):
+            new_alpha = s.alpha_ratio * val if i == idx else s.alpha_ratio
+            out.append(Sublattice(s.name, s.bravais, s.offset_frac, alpha_ratio=new_alpha, visible=s.visible))
+    else:
+        out = [Sublattice(s.name, s.bravais, s.offset_frac, s.alpha_ratio, s.visible) for s in subs_in]
+    return out
+
 if st.button("Run scan"):
     xs = np.linspace(vmin, vmax, int(steps))
     curves = {N: np.full(xs.shape, np.nan) for N in Ns}
     prog = st.progress(0, text="Scanning…")
 
-    def clone_params(base: LatticeParams, **kw) -> LatticeParams:
-        d = dict(a=base.a, b_ratio=base.b_ratio, c_ratio=base.c_ratio,
-                 alpha=base.alpha, beta=base.beta, gamma=base.gamma)
-        d.update(kw)
-        return LatticeParams(**d)
-
     for i, val in enumerate(xs):
-        p_i = clone_params(p, **{param: float(val)})
+        if scan_target in struct_params:
+            p_i = clone_params(p, **{scan_target: float(val)})
+            subs_i = subs
+            xlabel = label
+        else:
+            p_i = p  # lattice unchanged
+            subs_i = apply_alpha_scan(subs, scan_target, float(val))
+            xlabel = label
+
+            # Optional sanity: cap extreme α to keep searches stable (skip if wanted)
+            # (no-op by default)
+
         for N in Ns:
             s_star, _ = find_threshold_s_for_N(
-                N, subs, p_i, repeat,
+                N, subs_i, p_i, repeat,
                 s_min=srange_min, s_max=srange_max,
                 k_samples_coarse=k_coarse, k_samples_fine=k_fine,
                 tol_inside=tol_inside,
@@ -248,15 +284,15 @@ if st.button("Run scan"):
     fig, ax = plt.subplots()
     for N in Ns:
         ax.plot(xs, curves[N], label=f"N={N}")
-    ax.set_xlabel(param)
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("s*_N (min radius scale)")
-    ax.set_title("Threshold radii vs structural parameter")
+    ax.set_title("Threshold radii vs parameter")
     ax.legend()
     st.pyplot(fig, clear_figure=True)
 
 st.caption(
-    "Chemistry mode: α_i = r_metal + r_anion (Å). Override any metal radius if needed. "
-    "Radii are used as ratios (s rescales globally). Engine uses minimal-image + KDTree."
+    "Chemistry mode sets α_i = r_metal + r_anion (Å). Radius-ratio scan multiplies α_i by a scalar "
+    "for all lattices or a selected sublattice. Engine: minimal-image + KDTree."
 )
 
 # =====================================================
@@ -276,22 +312,19 @@ with colv[3]:
     draw_btn = st.button("Render unit cell view")
 
 def _cell_corners_and_edges(a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int,int]]]:
-    # 8 corners in fractional coords
     fracs = np.array([
         [0,0,0],[1,0,0],[0,1,0],[0,0,1],
         [1,1,0],[1,0,1],[0,1,1],[1,1,1]
     ], float)
-    M = np.vstack([a_vec, b_vec, c_vec]).T  # 3x3
+    M = np.vstack([a_vec, b_vec, c_vec]).T
     corners = (fracs @ M.T)
-    # edges as pairs of corner indices
-    idx = {
+    edges = [
         (0,1),(0,2),(0,3),
         (1,4),(1,5),
         (2,4),(2,6),
         (3,5),(3,6),
         (4,7),(5,7),(6,7)
-    }
-    edges = list(idx)
+    ]
     return corners, edges
 
 def _points_for_sublattice(sub: Sublattice, p: LatticeParams) -> np.ndarray:
@@ -301,26 +334,24 @@ def _points_for_sublattice(sub: Sublattice, p: LatticeParams) -> np.ndarray:
     pts = []
     for b in basis:
         frac = np.asarray(b) + off
-        # keep only those within [0,1) in fractional, with tiny tolerance
         f_mod = np.mod(frac, 1.0)
         cart = frac_to_cart(f_mod, a_vec, b_vec, c_vec)
         pts.append(cart)
     return np.asarray(pts)
 
 def _cart_to_frac(cart: np.ndarray, a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> np.ndarray:
-    M = np.vstack([a_vec, b_vec, c_vec]).T  # 3x3
+    M = np.vstack([a_vec, b_vec, c_vec]).T
     return np.linalg.solve(M, cart.T).T
 
 if draw_btn:
     a_vec, b_vec, c_vec = lattice_vectors(p)
-    # Lattice points per enabled sublattice
     sub_pts = []
     for i, sub in enumerate(subs):
         if not sub.visible:
             continue
         pts = _points_for_sublattice(sub, p)
         sub_pts.append((sub.name, pts))
-    # Intersections at chosen multiplicity (compute all >=2, cluster already done in engine)
+
     m_all, reps, repc = max_multiplicity_for_scale(
         subs, p, repeat, vis_s,
         k_samples=k_fine,
@@ -328,8 +359,6 @@ if draw_btn:
         cluster_eps=cluster_eps * a,
         early_stop_at=None
     )
-    # Filter reps to those inside the central cell and with exact multiplicity = show_mult
-    # Use fractional coords test (0..1 with small tol)
     tol_frac = 1e-6
     rep_list = []
     for pt, cnt in zip(reps, repc):
@@ -340,22 +369,16 @@ if draw_btn:
             rep_list.append(pt)
     rep_arr = np.asarray(rep_list) if rep_list else np.empty((0,3))
 
-    # ---- Build Plotly figure ----
     fig = go.Figure()
-
-    # Unit cell edges
     corners, edges = _cell_corners_and_edges(a_vec, b_vec, c_vec)
     for i,j in edges:
         fig.add_trace(go.Scatter3d(
             x=[corners[i,0], corners[j,0]],
             y=[corners[i,1], corners[j,1]],
             z=[corners[i,2], corners[j,2]],
-            mode="lines",
-            line=dict(width=4),
-            showlegend=False
+            mode="lines", line=dict(width=4), showlegend=False
         ))
 
-    # Sublattice points
     palette = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
     for idx, (name, pts) in enumerate(sub_pts):
         if len(pts)==0: 
@@ -370,7 +393,6 @@ if draw_btn:
             marker_color=palette[idx % len(palette)],
         ))
 
-    # Intersections (order N)
     if rep_arr.size:
         fig.add_trace(go.Scatter3d(
             x=rep_arr[:,0], y=rep_arr[:,1], z=rep_arr[:,2],
