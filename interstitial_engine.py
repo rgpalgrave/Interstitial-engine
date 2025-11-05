@@ -432,47 +432,60 @@ def compute_cn_representative(
     cluster_eps: Optional[float] = None,
 ) -> int:
     """
-    Return the CN for a single *representative* metal center in sublattice `sub_index`,
-    counting hotspots of multiplicity k_filter (exact or >=).
+    CN for one representative metal center in sublattice `sub_index`.
+    Counts each hotspot once by assigning it to its single nearest
+    metal center under periodic boundary conditions (min over 27 images).
     """
     key, centers, alphas, sub_ids, shifts = _geo_key_and_arrays(sublattices, p)
     mask = (sub_ids == int(sub_index))
     if centers.size == 0 or not np.any(mask) or not sublattices[sub_index].visible:
         return 0
+
     rep_idx = int(np.flatnonzero(mask)[0])
     rep_radius = float(alphas[rep_idx] * scale_s * p.a)
 
-    mmax, reps, repc = max_multiplicity_for_scale(
+    # Hotspots (clustered)
+    _, reps, repc = max_multiplicity_for_scale(
         sublattices, p, 1, scale_s, k_samples=k_samples,
-        tol_inside=tol_surface, cluster_eps=cluster_eps if cluster_eps is not None else 0.1 * p.a,
+        tol_inside=tol_surface,
+        cluster_eps=cluster_eps if cluster_eps is not None else 0.1 * p.a,
         early_stop_at=None
     )
     if len(reps) == 0:
         return 0
     reps = np.asarray(reps); repc = np.asarray(repc, int)
+
+    # Multiplicity filter
     if mode == "exact":
         pick = np.where(repc == int(k_filter))[0]
     else:
         pick = np.where(repc >= int(k_filter))[0]
     if pick.size == 0:
         return 0
-    pts = reps[pick]
+    pts = reps[pick]  # (M,3)
 
+    # Assign each hotspot to its single nearest metal center across all images
     if _HAVE_SCIPY:
         tree = KDTree(centers.copy())
         cn = 0
-        for S in shifts:
-            P = pts - S
-            d, idx = tree.query(P, k=1)
-            ok = (idx == rep_idx) & (np.abs(d - rep_radius) <= tol_surface)
-            cn += int(np.count_nonzero(ok))
+        for pnt in pts:
+            best_d = float("inf")
+            best_idx = -1
+            for S in shifts:
+                d, idx = tree.query(pnt - S, k=1)
+                if d < best_d:
+                    best_d = d
+                    best_idx = idx
+            if (best_idx == rep_idx) and (abs(best_d - rep_radius) <= tol_surface):
+                cn += 1
         return cn
     else:
-        all_centers = np.vstack([centers + S for S in shifts])
-        d = np.linalg.norm(all_centers[None, :, :] - pts[:, None, :], axis=2)
-        nn = np.argmin(d, axis=1)
+        # Fallback w/o KDTree: brute-force nearest over all images (vectorised)
+        all_centers = np.vstack([centers + S for S in shifts])  # (27*N,3)
+        d = np.linalg.norm(pts[:, None, :] - all_centers[None, :, :], axis=2)  # (M,27*N)
+        nn = np.argmin(d, axis=1)  # nearest (over all images)
         dmin = d[np.arange(len(pts)), nn]
         N = len(centers)
-        idx = (nn % N)
+        idx = (nn % N)  # map back to central-cell index
         ok = (idx == rep_idx) & (np.abs(dmin - rep_radius) <= tol_surface)
         return int(np.count_nonzero(ok))
