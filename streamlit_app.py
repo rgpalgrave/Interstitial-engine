@@ -543,6 +543,274 @@ st.caption(
 )
 
 # =====================================================
+# 2D PARAMETER SCAN
+# =====================================================
+st.divider()
+st.header("2D Parameter Scan (Heatmap)")
+
+col_2d = st.columns(2)
+with col_2d[0]:
+    do_2d_scan = st.checkbox("Enable 2D scan", value=False, key="enable_2d_scan")
+
+if do_2d_scan:
+    st.subheader("2D Scan Configuration")
+    
+    # Select two independent parameters
+    col_2d_params = st.columns(2)
+    all_params = struct_params + [f"alpha(Sub{i+1})" for i in range(int(num_subs))]
+    
+    with col_2d_params[0]:
+        param_x = st.selectbox(
+            "X-axis parameter",
+            all_params,
+            key="param_2d_x"
+        )
+    with col_2d_params[1]:
+        param_y = st.selectbox(
+            "Y-axis parameter",
+            all_params,
+            key="param_2d_y",
+            index=min(1, len(all_params)-1)  # Default to different param
+        )
+    
+    # Validate params are different
+    if param_x == param_y:
+        st.error("X and Y parameters must be different!")
+        do_2d_scan = False
+    
+    if do_2d_scan:
+        # Get parameter labels
+        def get_param_label(p):
+            if p in struct_params:
+                return p
+            else:
+                try:
+                    idx = int(p.split("Sub")[1].split(")")[0].strip()) - 1
+                    return f"α (Sub {idx+1})"
+                except:
+                    return p
+        
+        label_x = get_param_label(param_x)
+        label_y = get_param_label(param_y)
+        
+        # Parameter ranges
+        col_2d_x = st.columns(3)
+        with col_2d_x[0]:
+            x_min = st.number_input("X min", -10.0, 10.0, 0.5, 0.1, key="x_min_2d")
+        with col_2d_x[1]:
+            x_max = st.number_input("X max", 0.0, 20.0, 2.0, 0.1, key="x_max_2d")
+        with col_2d_x[2]:
+            x_steps = st.number_input("X points", 3, 50, 15, 1, key="x_steps_2d")
+        
+        col_2d_y = st.columns(3)
+        with col_2d_y[0]:
+            y_min = st.number_input("Y min", -10.0, 10.0, 0.5, 0.1, key="y_min_2d")
+        with col_2d_y[1]:
+            y_max = st.number_input("Y max", 0.0, 20.0, 2.0, 0.1, key="y_max_2d")
+        with col_2d_y[2]:
+            y_steps = st.number_input("Y points", 3, 50, 15, 1, key="y_steps_2d")
+        
+        # Single multiplicity target
+        col_2d_k = st.columns(3)
+        with col_2d_k[0]:
+            k_target_2d = st.number_input("Target multiplicity N", 2, 24, 4, 1, key="k_target_2d")
+        with col_2d_k[1]:
+            max_workers_2d = st.number_input("Parallel workers (2D)", 1, 16, 4, 1, key="max_workers_2d")
+        with col_2d_k[2]:
+            st.write("")
+        
+        # 2D scan button
+        if st.button("⚡ Run 2D Scan", use_container_width=True, key="run_2d"):
+            st.session_state.run_count += 1
+            
+            x_vals = np.linspace(x_min, x_max, int(x_steps))
+            y_vals = np.linspace(y_min, y_max, int(y_steps))
+            
+            # Result matrix
+            heatmap = np.full((len(y_vals), len(x_vals)), np.nan)
+            
+            progress_bar = st.progress(0, text="Initializing 2D scan…")
+            
+            # 2D parallel execution
+            def compute_2d_point(ix: int, iy: int, x_val: float, y_val: float) -> Tuple[int, int, Optional[float]]:
+                """Compute s* for one (x,y) point at target multiplicity"""
+                try:
+                    # Apply x parameter
+                    if param_x in struct_params:
+                        p_xy = clone_params(p, **{param_x: float(x_val)})
+                        subs_xy = subs
+                    else:
+                        p_xy = p
+                        subs_xy = apply_alpha_scan(subs, param_x, float(x_val), linked_pairs)
+                    
+                    # Apply y parameter
+                    if param_y in struct_params:
+                        p_xy = clone_params(p_xy, **{param_y: float(y_val)})
+                    else:
+                        subs_xy = apply_alpha_scan(subs_xy, param_y, float(y_val), linked_pairs)
+                    
+                    s_star, _ = find_threshold_s_for_N(
+                        int(k_target_2d), subs_xy, p_xy, repeat,
+                        s_min=srange_min, s_max=srange_max,
+                        k_samples_coarse=4, k_samples_fine=8,
+                        tol_inside=tol_inside,
+                        cluster_eps=cluster_eps * p_xy.a,
+                        max_iter=20
+                    )
+                    return ix, iy, s_star
+                except Exception as e:
+                    st.warning(f"Error at ({ix},{iy}): {e}")
+                    return ix, iy, None
+            
+            with ThreadPoolExecutor(max_workers=int(max_workers_2d)) as executor:
+                futures = {}
+                total_tasks = len(x_vals) * len(y_vals)
+                
+                for iy, y_val in enumerate(y_vals):
+                    for ix, x_val in enumerate(x_vals):
+                        fut = executor.submit(compute_2d_point, ix, iy, x_val, y_val)
+                        futures[fut] = (ix, iy)
+                
+                completed = 0
+                for future in as_completed(futures):
+                    completed += 1
+                    try:
+                        ix, iy, s_star = future.result()
+                        heatmap[iy, ix] = s_star if s_star is not None else np.nan
+                    except Exception as e:
+                        st.warning(f"Task failed: {e}")
+                    
+                    pct = int((completed / total_tasks) * 100)
+                    progress_bar.progress(pct, text=f"Scanning… {completed}/{total_tasks} ({pct}%)")
+            
+            progress_bar.empty()
+            
+            # Store 2D scan data
+            st.session_state.last_2d_scan_data = {
+                "heatmap": heatmap,
+                "x_vals": x_vals,
+                "y_vals": y_vals,
+                "label_x": label_x,
+                "label_y": label_y,
+                "param_x": param_x,
+                "param_y": param_y,
+                "k_target": k_target_2d,
+            }
+            
+            # Plot heatmap using Plotly
+            fig = go.Figure(data=go.Heatmap(
+                z=heatmap,
+                x=x_vals,
+                y=y_vals,
+                colorscale="Viridis",
+                colorbar=dict(title=f"s* for N={k_target_2d}"),
+                hoverongaps=False,
+                hovertemplate=f"{label_x}: %{{x:.3f}}<br>{label_y}: %{{y:.3f}}<br>s* = %{{z:.4f}}<extra></extra>"
+            ))
+            
+            fig.update_layout(
+                title=f"2D Scan: s* for N={k_target_2d} multiplicity",
+                xaxis_title=label_x,
+                yaxis_title=label_y,
+                width=900,
+                height=700,
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            st.success(f"✓ 2D scan complete! ({x_steps} × {y_steps} = {int(x_steps*y_steps)} points)")
+        
+        # =====================================================
+        # 2D EXPORT
+        # =====================================================
+        if "last_2d_scan_data" in st.session_state and st.session_state.last_2d_scan_data:
+            st.divider()
+            st.subheader("Export 2D Scan Data")
+            
+            col_2d_exp = st.columns(3)
+            with col_2d_exp[0]:
+                exp_2d_format = st.selectbox("Format", ["CSV", "NumPy NPZ", "JSON"], key="export_2d_format")
+            with col_2d_exp[1]:
+                st.write("")
+            with col_2d_exp[2]:
+                exp_2d_btn = st.button("Download 2D", key="download_2d")
+            
+            if exp_2d_btn:
+                data_2d = st.session_state.last_2d_scan_data
+                hm = data_2d["heatmap"]
+                xs_2d = data_2d["x_vals"]
+                ys_2d = data_2d["y_vals"]
+                
+                if exp_2d_format == "CSV":
+                    # Flatten heatmap: header row + header col
+                    output = io.StringIO()
+                    writer = csv.writer(output)
+                    
+                    # Header row with x values
+                    header = [f"{data_2d['label_y']}/{data_2d['label_x']}"] + [f"{x:.4f}" for x in xs_2d]
+                    writer.writerow(header)
+                    
+                    # Data rows
+                    for iy, y_val in enumerate(ys_2d):
+                        row = [f"{y_val:.4f}"] + [str(hm[iy, ix]) if not np.isnan(hm[iy, ix]) else "" 
+                                                   for ix in range(len(xs_2d))]
+                        writer.writerow(row)
+                    
+                    filename = f"scan_2d_{data_2d['param_x']}_{data_2d['param_y']}.csv"
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=output.getvalue(),
+                        file_name=filename,
+                        mime="text/plain",
+                        key="download_2d_csv"
+                    )
+                
+                elif exp_2d_format == "NumPy NPZ":
+                    # Binary NumPy format (efficient)
+                    buf = io.BytesIO()
+                    np.savez(
+                        buf,
+                        heatmap=hm,
+                        x_values=xs_2d,
+                        y_values=ys_2d,
+                        x_label=np.string_(data_2d['label_x']),
+                        y_label=np.string_(data_2d['label_y']),
+                        k_target=data_2d['k_target']
+                    )
+                    buf.seek(0)
+                    
+                    filename = f"scan_2d_{data_2d['param_x']}_{data_2d['param_y']}.npz"
+                    st.download_button(
+                        label="📥 Download NPZ",
+                        data=buf.getvalue(),
+                        file_name=filename,
+                        mime="application/octet-stream",
+                        key="download_2d_npz"
+                    )
+                
+                elif exp_2d_format == "JSON":
+                    import json
+                    json_data = {
+                        "x_parameter": data_2d['param_x'],
+                        "y_parameter": data_2d['param_y'],
+                        "x_label": data_2d['label_x'],
+                        "y_label": data_2d['label_y'],
+                        "k_target": data_2d['k_target'],
+                        "x_values": xs_2d.tolist(),
+                        "y_values": ys_2d.tolist(),
+                        "heatmap": hm.tolist(),  # 2D array as list of lists
+                        "shape": list(hm.shape)
+                    }
+                    
+                    filename = f"scan_2d_{data_2d['param_x']}_{data_2d['param_y']}.json"
+                    st.download_button(
+                        label="📥 Download JSON",
+                        data=json.dumps(json_data, indent=2),
+                        file_name=filename,
+                        mime="application/json",
+                        key="download_2d_json"
+                    )
+
+# =====================================================
 # 3D UNIT CELL VIEW
 # =====================================================
 st.divider()
