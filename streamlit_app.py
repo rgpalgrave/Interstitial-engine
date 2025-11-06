@@ -270,9 +270,7 @@ def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[S
         out.append(Sublattice(s.name, s.bravais, s.offset_frac, new_alpha, s.visible))
     return out
 
-if "scan_nonce" not in st.session_state: st.session_state.scan_nonce = 0
-def _bump_nonce(): st.session_state.scan_nonce += 1
-run_scan = st.button("Run scan", key=f"run_scan_btn_{st.session_state.scan_nonce}", on_click=_bump_nonce)
+run_scan = st.button("Run scan", key="run_scan_btn")
 
 if run_scan:
     xs = np.linspace(vmin, vmax, int(steps))
