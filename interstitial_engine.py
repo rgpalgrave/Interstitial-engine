@@ -1,7 +1,7 @@
 # =====================================================
 # interstitial_engine.py
 # Fast "visualiser-logic" engine for interstitial hotspots
-# (now with early-stop wiring and precomputed pairlists for scans)
+# (with early-stop + pairlist for scans; early-return skips clustering)
 # =====================================================
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class Sublattice:
     name: str
     bravais: str
     offset_frac: Tuple[float, float, float]
-    alpha_ratio: float  # r_i = alpha_ratio * s * a  (alpha_ratio is dimensionless if you treat s*a as length scale)
+    alpha_ratio: float  # r_i = alpha_ratio * s * a
     visible: bool = True
 
 
@@ -114,7 +114,7 @@ def generate_centers_minimal(sub: Sublattice, p: LatticeParams) -> np.ndarray:
 
 
 # -------------------------------
-# Cached geometry (centers/alphas/shifts)
+# Cached geometry
 # -------------------------------
 
 def _make_key(sublattices: List[Sublattice], p: LatticeParams):
@@ -240,34 +240,26 @@ def _count_multiplicity_at_points(points: np.ndarray,
 
 
 # -------------------------------
-# Pairlist precomputation (NEW)
+# Pairlist precomputation
 # -------------------------------
 
 @dataclass(frozen=True)
 class PairList:
-    # tuples of (i, j, sidx, d_vec) with c1 = centers[i], c2 = centers[j] + shifts[sidx]
     pairs: List[Tuple[int,int,int,Tuple[float,float,float]]]
     centers: np.ndarray
     alphas: np.ndarray
     shifts: np.ndarray
 
 def build_pairlist(sublattices: List[Sublattice], p: LatticeParams, s_cut: float) -> PairList:
-    """
-    Precompute candidate overlapping pairs under the condition:
-        d_ij(sidx) <= s_cut * a * (alpha_i + alpha_j)
-    where d_ij is the distance between center i and (j + shift[sidx]).
-    This is a *superset* of real intersections for any s in [0, s_cut], but prunes far pairs.
-    """
     key = _make_key(sublattices, p)
     centers, alphas, sub_ids, shifts = centers_alphas_and_shifts(key.subs, key.p)
     if centers.size == 0:
         return PairList([], centers, alphas, shifts)
 
     a_len = float(p.a)
-    alpha_sum_max = float( (alphas[:,None] + alphas[None,:]).max() )
+    alpha_sum_max = float((alphas[:,None] + alphas[None,:]).max())
     R_cut = s_cut * a_len * alpha_sum_max + 1e-9
 
-    # KDTree on image centers (27 images)
     pairs: List[Tuple[int,int,int,Tuple[float,float,float]]] = []
     if _HAVE_SCIPY:
         img_centers = []
@@ -288,7 +280,6 @@ def build_pairlist(sublattices: List[Sublattice], p: LatticeParams, s_cut: float
                     continue
                 c1 = centers[j] + shifts[sidx]
                 d_vec = c1 - c0
-                # keep it — detailed r1,r2 check happens later at specific s
                 pairs.append((i, j, sidx, (float(d_vec[0]), float(d_vec[1]), float(d_vec[2]))))
     else:
         for i, c0 in enumerate(centers):
@@ -320,14 +311,15 @@ def max_multiplicity_for_scale(sublattices: List[Sublattice],
                                ) -> Tuple[int, List[np.ndarray], List[int]]:
     """
     Evaluate k_max at fixed s using pair-circle sampling + clustering.
-    Optional 'pairlist' reuses precomputed candidate pairs (big speedup for scans).
+    If early_stop_at is provided, we will return immediately once any sample reaches that multiplicity
+    AND (NEW) skip clustering entirely to keep scans fast.
     """
     if pairlist is None:
         key = _make_key(sublattices, p)
         centers, alphas, sub_ids, shifts = centers_alphas_and_shifts(key.subs, key.p)
         if centers.size == 0:
             return 0, [], []
-        use_pairs = None  # will search pairs on the fly
+        use_pairs = None
     else:
         centers = pairlist.centers
         alphas  = pairlist.alphas
@@ -341,12 +333,10 @@ def max_multiplicity_for_scale(sublattices: List[Sublattice],
 
     sample_pts = []
     if use_pairs is not None:
-        # fast path: reuse candidate pairs
         for (i, j, sidx, dxyz) in use_pairs:
             c0 = centers[i]
             c1 = centers[j] + shifts[sidx]
             r1 = radii[i]; r2 = radii[j]
-            # quick reject at this s
             d = math.sqrt(dxyz[0]*dxyz[0] + dxyz[1]*dxyz[1] + dxyz[2]*dxyz[2])
             if d > (r1 + r2) or d < abs(r1 - r2) or d < 1e-12:
                 continue
@@ -354,9 +344,7 @@ def max_multiplicity_for_scale(sublattices: List[Sublattice],
             if pts is not None:
                 sample_pts.append(pts)
     else:
-        # original neighbor search path
         if _HAVE_SCIPY:
-            # build once
             img_centers = []
             img_index   = []
             for si, S in enumerate(shifts):
@@ -399,6 +387,11 @@ def max_multiplicity_for_scale(sublattices: List[Sublattice],
 
     samples = np.vstack(sample_pts)
     counts = _count_multiplicity_at_points(samples, centers, radii, shifts, tol_inside, early_stop_at)
+
+    # -------- NEW: if threshold was hit, skip clustering and return quickly
+    if (early_stop_at is not None) and np.any(counts >= early_stop_at):
+        return int(early_stop_at), [], []
+
     kmax = int(counts.max(initial=0))
     clusters, cvals = _cluster_points(samples, counts, cluster_eps)
     return kmax, clusters, cvals
@@ -417,25 +410,18 @@ def find_threshold_s_for_N(N_target: int,
                            max_iter: int = 30,
                            pairlist: Optional[PairList] = None
                            ) -> Tuple[Optional[float], Dict[int, float]]:
-    """
-    Bisection on s to find minimal s where k_max(s) >= N_target.
-    Now passes early_stop_at=N_target to short-circuit counting when possible.
-    """
     milestones: Dict[int, float] = {}
     lo, hi = float(s_min), float(s_max)
 
-    km_lo, _, _ = max_multiplicity_for_scale(
-        sublattices, p, 1, lo, k_samples=k_samples_coarse,
-        tol_inside=tol_inside, cluster_eps=cluster_eps,
-        early_stop_at=N_target, pairlist=pairlist
-    )
+    km_lo, _, _ = max_multiplicity_for_scale(sublattices, p, 1, lo,
+                                             k_samples=k_samples_coarse,
+                                             tol_inside=tol_inside, cluster_eps=cluster_eps,
+                                             early_stop_at=N_target, pairlist=pairlist)
     milestones[km_lo] = milestones.get(km_lo, lo)
-
-    km_hi, _, _ = max_multiplicity_for_scale(
-        sublattices, p, 1, hi, k_samples=k_samples_coarse,
-        tol_inside=tol_inside, cluster_eps=cluster_eps,
-        early_stop_at=N_target, pairlist=pairlist
-    )
+    km_hi, _, _ = max_multiplicity_for_scale(sublattices, p, 1, hi,
+                                             k_samples=k_samples_coarse,
+                                             tol_inside=tol_inside, cluster_eps=cluster_eps,
+                                             early_stop_at=N_target, pairlist=pairlist)
     milestones[km_hi] = milestones.get(km_hi, hi)
     if km_hi < N_target:
         return None, milestones
@@ -443,11 +429,10 @@ def find_threshold_s_for_N(N_target: int,
     s_star = None
     for _ in range(max_iter):
         mid = 0.5*(lo+hi)
-        km, _, _ = max_multiplicity_for_scale(
-            sublattices, p, 1, mid, k_samples=k_samples_fine,
-            tol_inside=tol_inside, cluster_eps=cluster_eps,
-            early_stop_at=N_target, pairlist=pairlist
-        )
+        km, _, _ = max_multiplicity_for_scale(sublattices, p, 1, mid,
+                                              k_samples=k_samples_fine,
+                                              tol_inside=tol_inside, cluster_eps=cluster_eps,
+                                              early_stop_at=N_target, pairlist=pairlist)
         milestones[km] = milestones.get(km, mid)
         if km >= N_target:
             s_star = mid
@@ -460,7 +445,7 @@ def find_threshold_s_for_N(N_target: int,
 
 
 # -------------------------------
-# CN (representative site) with no double-counting
+# CN (representative site) (unchanged)
 # -------------------------------
 
 def _geo_key_and_arrays(sublattices: List[Sublattice], p: LatticeParams):
@@ -510,13 +495,11 @@ def compute_cn_representative(
         tree = KDTree(centers.copy())
         cn = 0
         for pnt in pts:
-            best_d = float("inf")
-            best_idx = -1
+            best_d = float("inf"); best_idx = -1
             for S in shifts:
                 d, idx = tree.query(pnt - S, k=1)
                 if d < best_d:
-                    best_d = d
-                    best_idx = idx
+                    best_d = d; best_idx = idx
             if (best_idx == rep_idx) and (abs(best_d - rep_radius) <= tol_surface):
                 cn += 1
         return cn
