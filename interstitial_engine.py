@@ -1,11 +1,7 @@
 # =====================================================
 # interstitial_engine.py
 # Fast "visualiser-logic" engine for interstitial hotspots
-# - Bravais lattices, fractional offsets, global cell metrics
-# - Pair-circle sampling on sphere intersections
-# - Clustering of sampled points to yield hotspots
-# - k_max(s), bisection to find s*_N
-# - Coordination Number (CN) on representative site per sublattice
+# (now with early-stop wiring and precomputed pairlists for scans)
 # =====================================================
 
 from __future__ import annotations
@@ -40,7 +36,7 @@ class Sublattice:
     name: str
     bravais: str
     offset_frac: Tuple[float, float, float]
-    alpha_ratio: float  # r_i = alpha_ratio * s * a
+    alpha_ratio: float  # r_i = alpha_ratio * s * a  (alpha_ratio is dimensionless if you treat s*a as length scale)
     visible: bool = True
 
 
@@ -49,7 +45,6 @@ class Sublattice:
 # -------------------------------
 
 def lattice_vectors(p: LatticeParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (a_vec, b_vec, c_vec) in Cartesian for a triclinic cell defined by a, b=a*b_ratio, c=a*c_ratio and angles."""
     a = float(p.a)
     b = float(p.a * p.b_ratio)
     c = float(p.a * p.c_ratio)
@@ -57,15 +52,9 @@ def lattice_vectors(p: LatticeParams) -> Tuple[np.ndarray, np.ndarray, np.ndarra
     beta  = math.radians(p.beta)
     gamma = math.radians(p.gamma)
 
-    ax = a
-    ay = 0.0
-    az = 0.0
+    ax = a; ay = 0.0; az = 0.0
+    bx = b * math.cos(gamma); by = b * math.sin(gamma); bz = 0.0
 
-    bx = b * math.cos(gamma)
-    by = b * math.sin(gamma)
-    bz = 0.0
-
-    # c vector via general formula
     cx = c * math.cos(beta)
     s_gamma = math.sin(gamma) if abs(math.sin(gamma)) > 1e-12 else 1e-12
     cy = c * (math.cos(alpha) - math.cos(beta) * math.cos(gamma)) / s_gamma
@@ -78,7 +67,7 @@ def lattice_vectors(p: LatticeParams) -> Tuple[np.ndarray, np.ndarray, np.ndarra
     return a_vec, b_vec, c_vec
 
 def frac_to_cart(frac: np.ndarray, a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> np.ndarray:
-    M = np.vstack([a_vec, b_vec, c_vec]).T  # 3x3
+    M = np.vstack([a_vec, b_vec, c_vec]).T
     f = np.asarray(frac, float)
     return (f @ M.T)
 
@@ -88,64 +77,44 @@ def _cart_to_frac(cart: np.ndarray, a_vec: np.ndarray, b_vec: np.ndarray, c_vec:
 
 
 # -------------------------------
-# Bravais bases (primitive bases for motif)
-# (minimal set; UI handles Wyckoff-like offsets)
+# Bravais bases (primitive motifs)
 # -------------------------------
 
 def bravais_basis(bravais: str) -> List[Tuple[float, float, float]]:
     b = bravais
-    if b == "cubic_P":
-        return [(0,0,0)]
-    if b == "cubic_I":
-        return [(0,0,0), (0.5,0.5,0.5)]
-    if b == "cubic_F":
-        return [(0,0,0), (0,0.5,0.5), (0.5,0,0.5), (0.5,0.5,0)]
-    if b == "cubic_Diamond":
-        return [(0,0,0), (0.25,0.25,0.25)]
-    if b == "cubic_Pyrochlore":
-        # pragmatic metal-basis
-        return [(0,0,0), (0.5,0.5,0), (0.5,0,0.5), (0,0.5,0.5)]
-    if b == "tetragonal_P":
-        return [(0,0,0)]
-    if b == "tetragonal_I":
-        return [(0,0,0), (0.5,0.5,0.5)]
-    if b == "orthorhombic_P":
-        return [(0,0,0)]
-    if b == "orthorhombic_C":
-        return [(0,0,0), (0,0.5,0.5)]
-    if b == "orthorhombic_I":
-        return [(0,0,0), (0.5,0.5,0.5)]
-    if b == "orthorhombic_F":
-        return [(0,0,0), (0.5,0.5,0), (0,0.5,0.5), (0.5,0,0.5)]
-    if b == "hexagonal_P":
-        return [(0,0,0)]
-    if b == "hexagonal_HCP":
-        return [(0,0,0), (2/3, 1/3, 0.5)]
-    if b == "rhombohedral_R":
-        return [(0,0,0)]
-    if b == "monoclinic_P":
-        return [(0,0,0)]
-    if b == "monoclinic_C":
-        return [(0,0,0), (0,0.5,0)]
-    if b == "triclinic_P":
-        return [(0,0,0)]
+    if b == "cubic_P": return [(0,0,0)]
+    if b == "cubic_I": return [(0,0,0), (0.5,0.5,0.5)]
+    if b == "cubic_F": return [(0,0,0), (0,0.5,0.5), (0.5,0,0.5), (0.5,0.5,0)]
+    if b == "cubic_Diamond": return [(0,0,0), (0.25,0.25,0.25)]
+    if b == "cubic_Pyrochlore": return [(0,0,0), (0.5,0.5,0), (0.5,0,0.5), (0,0.5,0.5)]
+    if b == "tetragonal_P": return [(0,0,0)]
+    if b == "tetragonal_I": return [(0,0,0), (0.5,0.5,0.5)]
+    if b == "orthorhombic_P": return [(0,0,0)]
+    if b == "orthorhombic_C": return [(0,0,0), (0,0.5,0.5)]
+    if b == "orthorhombic_I": return [(0,0,0), (0.5,0.5,0.5)]
+    if b == "orthorhombic_F": return [(0,0,0), (0.5,0.5,0), (0,0.5,0.5), (0.5,0,0.5)]
+    if b == "hexagonal_P": return [(0,0,0)]
+    if b == "hexagonal_HCP": return [(0,0,0), (2/3, 1/3, 0.5)]
+    if b == "rhombohedral_R": return [(0,0,0)]
+    if b == "monoclinic_P": return [(0,0,0)]
+    if b == "monoclinic_C": return [(0,0,0), (0,0.5,0)]
+    if b == "triclinic_P": return [(0,0,0)]
     return [(0,0,0)]
 
 
 def generate_centers_minimal(sub: Sublattice, p: LatticeParams) -> np.ndarray:
-    """Return Cartesian centers located at basis+offset within [0,1)^3."""
     a_vec, b_vec, c_vec = lattice_vectors(p)
     pts = []
     off = np.array(sub.offset_frac, float)
     for b in bravais_basis(sub.bravais):
         frac = np.array(b, float) + off
-        f = np.mod(frac, 1.0)  # keep inside unit cell
+        f = np.mod(frac, 1.0)
         pts.append(frac_to_cart(f, a_vec, b_vec, c_vec))
     return np.asarray(pts)
 
 
 # -------------------------------
-# Engine core: pair-circle sampling
+# Cached geometry (centers/alphas/shifts)
 # -------------------------------
 
 def _make_key(sublattices: List[Sublattice], p: LatticeParams):
@@ -156,16 +125,14 @@ def _make_key(sublattices: List[Sublattice], p: LatticeParams):
 
 @lru_cache(maxsize=128)
 def centers_alphas_and_shifts(subs_key, p_key):
-    """Cache central-cell centers, per-center alpha, sublattice ids, and 27 neighbor lattice shifts."""
     p = LatticeParams(*p_key)
     a_vec, b_vec, c_vec = lattice_vectors(p)
-    # 27 neighbor shifts (fractional -1,0,1 → cartesian)
     shifts = []
     for i in (-1,0,1):
         for j in (-1,0,1):
             for k in (-1,0,1):
                 shifts.append(frac_to_cart(np.array([i,j,k], float), a_vec, b_vec, c_vec))
-    shifts = np.asarray(shifts, float)  # (27,3)
+    shifts = np.asarray(shifts, float)
 
     centers = []
     alphas = []
@@ -192,8 +159,11 @@ def centers_alphas_and_shifts(subs_key, p_key):
     return centers, alphas, sub_ids, shifts
 
 
+# -------------------------------
+# Pair-circle sampling helpers
+# -------------------------------
+
 def _orthonormal_basis(n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Return two unit vectors u,v orthonormal to n (|n| assumed 1)."""
     n = np.asarray(n, float)
     if abs(n[0]) < 0.9:
         t = np.array([1.0, 0.0, 0.0])
@@ -203,16 +173,11 @@ def _orthonormal_basis(n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     v = np.cross(n, u); v /= (np.linalg.norm(v) + 1e-18)
     return u, v
 
-
 def _sample_pair_circle(c1: np.ndarray, r1: float, c2: np.ndarray, r2: float, k_samples: int) -> Optional[np.ndarray]:
-    """Return k_samples points on the intersection circle of two spheres, if it exists; else None."""
     d_vec = c2 - c1
     d = np.linalg.norm(d_vec)
-    if d < 1e-12:
-        return None
-    if d > (r1 + r2) or d < abs(r1 - r2):
-        return None
-
+    if d < 1e-12: return None
+    if d > (r1 + r2) or d < abs(r1 - r2): return None
     n = d_vec / d
     a = (r1*r1 - r2*r2 + d*d) / (2*d)
     rho2 = r1*r1 - a*a
@@ -223,25 +188,20 @@ def _sample_pair_circle(c1: np.ndarray, r1: float, c2: np.ndarray, r2: float, k_
     pts = center[None,:] + rho*np.cos(angles)[:,None]*u[None,:] + rho*np.sin(angles)[:,None]*v[None,:]
     return pts
 
-
 def _cluster_points(points: np.ndarray, values: np.ndarray, eps: float) -> Tuple[List[np.ndarray], List[int]]:
-    """Greedy clustering: merge points closer than eps; keep max value per cluster."""
     if points.size == 0:
         return [], []
     pts = np.asarray(points, float)
     vals = np.asarray(values, int)
     used = np.zeros(len(pts), dtype=bool)
-    clusters = []
-    cvals = []
+    clusters, cvals = [], []
     for i in range(len(pts)):
-        if used[i]:
-            continue
+        if used[i]: continue
         center = pts[i].copy()
         best_val = vals[i]
         count = 1
         for j in range(i+1, len(pts)):
-            if used[j]:
-                continue
+            if used[j]: continue
             if np.linalg.norm(pts[j] - center) <= eps:
                 used[j] = True
                 count += 1
@@ -253,20 +213,16 @@ def _cluster_points(points: np.ndarray, values: np.ndarray, eps: float) -> Tuple
         cvals.append(int(best_val))
     return clusters, cvals
 
-
 def _count_multiplicity_at_points(points: np.ndarray,
                                   centers: np.ndarray,
                                   radii: np.ndarray,
                                   shifts: np.ndarray,
                                   tol_inside: float,
                                   early_stop_at: Optional[int]=None) -> np.ndarray:
-    """Count, for each point, how many sphere surfaces pass through it (±tol_inside), over 27 images."""
     if points.size == 0:
         return np.zeros((0,), dtype=int)
     P = np.asarray(points, float)
-    M = P.shape[0]
-    counts = np.zeros(M, dtype=int)
-
+    counts = np.zeros(P.shape[0], dtype=int)
     for S in shifts:
         C = centers + S
         N = len(C)
@@ -283,31 +239,36 @@ def _count_multiplicity_at_points(points: np.ndarray,
     return counts
 
 
-def max_multiplicity_for_scale(sublattices: List[Sublattice],
-                               p: LatticeParams,
-                               repeat_ignored: int,
-                               scale_s: float,
-                               k_samples: int = 12,
-                               tol_inside: float = 1e-3,
-                               cluster_eps: float = 0.1,
-                               early_stop_at: Optional[int] = None
-                               ) -> Tuple[int, List[np.ndarray], List[int]]:
+# -------------------------------
+# Pairlist precomputation (NEW)
+# -------------------------------
+
+@dataclass(frozen=True)
+class PairList:
+    # tuples of (i, j, sidx, d_vec) with c1 = centers[i], c2 = centers[j] + shifts[sidx]
+    pairs: List[Tuple[int,int,int,Tuple[float,float,float]]]
+    centers: np.ndarray
+    alphas: np.ndarray
+    shifts: np.ndarray
+
+def build_pairlist(sublattices: List[Sublattice], p: LatticeParams, s_cut: float) -> PairList:
     """
-    Core evaluator at fixed s:
-      - Build all sphere centers (central cell only) + 27 shifts
-      - For overlapping pairs, sample intersection circle (k_samples points)
-      - Count multiplicities at samples
-      - Cluster nearby samples into hotspots, taking max multiplicity per cluster
-      - Return (kmax, hotspots, counts)
+    Precompute candidate overlapping pairs under the condition:
+        d_ij(sidx) <= s_cut * a * (alpha_i + alpha_j)
+    where d_ij is the distance between center i and (j + shift[sidx]).
+    This is a *superset* of real intersections for any s in [0, s_cut], but prunes far pairs.
     """
     key = _make_key(sublattices, p)
     centers, alphas, sub_ids, shifts = centers_alphas_and_shifts(key.subs, key.p)
     if centers.size == 0:
-        return 0, [], []
+        return PairList([], centers, alphas, shifts)
 
-    radii = (alphas * scale_s * p.a).astype(float)
+    a_len = float(p.a)
+    alpha_sum_max = float( (alphas[:,None] + alphas[None,:]).max() )
+    R_cut = s_cut * a_len * alpha_sum_max + 1e-9
 
-    # Build image centers KDTree if available
+    # KDTree on image centers (27 images)
+    pairs: List[Tuple[int,int,int,Tuple[float,float,float]]] = []
     if _HAVE_SCIPY:
         img_centers = []
         img_index   = []
@@ -317,41 +278,121 @@ def max_multiplicity_for_scale(sublattices: List[Sublattice],
         img_centers = np.vstack(img_centers)
         img_index   = np.concatenate(img_index)
         tree = KDTree(img_centers)
-    else:
-        tree = None
 
-    sample_pts = []
-    if _HAVE_SCIPY:
-        # pair pruning by radius-sum ball
-        rmax = float(radii.max(initial=0.0))
         for i, c0 in enumerate(centers):
-            r1 = radii[i]
-            idxs = tree.query_ball_point(c0, r=r1 + rmax + 1.0)  # generous
-            for idx in idxs:
-                sidx = img_index[idx]
-                j    = idx % len(centers)
+            idxs = tree.query_ball_point(c0, r=R_cut)
+            for gidx in idxs:
+                sidx = img_index[gidx]
+                j    = gidx % len(centers)
                 if sidx == 13 and j <= i:
                     continue
                 c1 = centers[j] + shifts[sidx]
-                r2 = radii[j]
-                pts = _sample_pair_circle(c0, r1, c1, r2, k_samples)
-                if pts is not None:
-                    sample_pts.append(pts)
+                d_vec = c1 - c0
+                # keep it — detailed r1,r2 check happens later at specific s
+                pairs.append((i, j, sidx, (float(d_vec[0]), float(d_vec[1]), float(d_vec[2]))))
     else:
         for i, c0 in enumerate(centers):
-            r1 = radii[i]
             for sidx, S in enumerate(shifts):
                 C = centers + S
                 for j, c1 in enumerate(C):
+                    if sidx == 13 and j <= i: continue
+                    d = np.linalg.norm(c1 - c0)
+                    if d <= R_cut:
+                        d_vec = c1 - c0
+                        pairs.append((i, j, sidx, (float(d_vec[0]), float(d_vec[1]), float(d_vec[2]))))
+
+    return PairList(pairs, centers, alphas, shifts)
+
+
+# -------------------------------
+# Core evaluator
+# -------------------------------
+
+def max_multiplicity_for_scale(sublattices: List[Sublattice],
+                               p: LatticeParams,
+                               repeat_ignored: int,
+                               scale_s: float,
+                               k_samples: int = 12,
+                               tol_inside: float = 1e-3,
+                               cluster_eps: float = 0.1,
+                               early_stop_at: Optional[int] = None,
+                               pairlist: Optional[PairList] = None
+                               ) -> Tuple[int, List[np.ndarray], List[int]]:
+    """
+    Evaluate k_max at fixed s using pair-circle sampling + clustering.
+    Optional 'pairlist' reuses precomputed candidate pairs (big speedup for scans).
+    """
+    if pairlist is None:
+        key = _make_key(sublattices, p)
+        centers, alphas, sub_ids, shifts = centers_alphas_and_shifts(key.subs, key.p)
+        if centers.size == 0:
+            return 0, [], []
+        use_pairs = None  # will search pairs on the fly
+    else:
+        centers = pairlist.centers
+        alphas  = pairlist.alphas
+        shifts  = pairlist.shifts
+        use_pairs = pairlist.pairs
+
+    if centers.size == 0:
+        return 0, [], []
+
+    radii = (alphas * scale_s * p.a).astype(float)
+
+    sample_pts = []
+    if use_pairs is not None:
+        # fast path: reuse candidate pairs
+        for (i, j, sidx, dxyz) in use_pairs:
+            c0 = centers[i]
+            c1 = centers[j] + shifts[sidx]
+            r1 = radii[i]; r2 = radii[j]
+            # quick reject at this s
+            d = math.sqrt(dxyz[0]*dxyz[0] + dxyz[1]*dxyz[1] + dxyz[2]*dxyz[2])
+            if d > (r1 + r2) or d < abs(r1 - r2) or d < 1e-12:
+                continue
+            pts = _sample_pair_circle(c0, r1, c1, r2, k_samples)
+            if pts is not None:
+                sample_pts.append(pts)
+    else:
+        # original neighbor search path
+        if _HAVE_SCIPY:
+            # build once
+            img_centers = []
+            img_index   = []
+            for si, S in enumerate(shifts):
+                img_centers.append(centers + S)
+                img_index.append(np.full(len(centers), si, int))
+            img_centers = np.vstack(img_centers)
+            img_index   = np.concatenate(img_index)
+            tree = KDTree(img_centers)
+            rmax = float(radii.max(initial=0.0))
+            for i, c0 in enumerate(centers):
+                r1 = radii[i]
+                idxs = tree.query_ball_point(c0, r=r1 + rmax + 1.0)
+                for idx in idxs:
+                    sidx = img_index[idx]
+                    j    = idx % len(centers)
                     if sidx == 13 and j <= i:
                         continue
+                    c1 = centers[j] + shifts[sidx]
                     r2 = radii[j]
-                    d = np.linalg.norm(c1 - c0)
-                    if d > (r1 + r2) or d < abs(r1 - r2) or d < 1e-12:
-                        continue
                     pts = _sample_pair_circle(c0, r1, c1, r2, k_samples)
                     if pts is not None:
                         sample_pts.append(pts)
+        else:
+            for i, c0 in enumerate(centers):
+                r1 = radii[i]
+                for sidx, S in enumerate(shifts):
+                    C = centers + S
+                    for j, c1 in enumerate(C):
+                        if sidx == 13 and j <= i: continue
+                        r2 = radii[j]
+                        d = np.linalg.norm(c1 - c0)
+                        if d > (r1 + r2) or d < abs(r1 - r2) or d < 1e-12:
+                            continue
+                        pts = _sample_pair_circle(c0, r1, c1, r2, k_samples)
+                        if pts is not None:
+                            sample_pts.append(pts)
 
     if not sample_pts:
         return 0, [], []
@@ -373,22 +414,28 @@ def find_threshold_s_for_N(N_target: int,
                            k_samples_fine: int = 16,
                            tol_inside: float = 1e-3,
                            cluster_eps: float = 0.1,
-                           max_iter: int = 30
+                           max_iter: int = 30,
+                           pairlist: Optional[PairList] = None
                            ) -> Tuple[Optional[float], Dict[int, float]]:
     """
-    Bisection on s to find minimal s where k_max(s) >= N_target. Returns (s_star, milestones),
-    where milestones maps m -> first s where k_max >= m (observed during search).
+    Bisection on s to find minimal s where k_max(s) >= N_target.
+    Now passes early_stop_at=N_target to short-circuit counting when possible.
     """
     milestones: Dict[int, float] = {}
     lo, hi = float(s_min), float(s_max)
 
-    km_lo, _, _ = max_multiplicity_for_scale(sublattices, p, 1, lo,
-                                             k_samples=k_samples_coarse,
-                                             tol_inside=tol_inside, cluster_eps=cluster_eps)
+    km_lo, _, _ = max_multiplicity_for_scale(
+        sublattices, p, 1, lo, k_samples=k_samples_coarse,
+        tol_inside=tol_inside, cluster_eps=cluster_eps,
+        early_stop_at=N_target, pairlist=pairlist
+    )
     milestones[km_lo] = milestones.get(km_lo, lo)
-    km_hi, _, _ = max_multiplicity_for_scale(sublattices, p, 1, hi,
-                                             k_samples=k_samples_coarse,
-                                             tol_inside=tol_inside, cluster_eps=cluster_eps)
+
+    km_hi, _, _ = max_multiplicity_for_scale(
+        sublattices, p, 1, hi, k_samples=k_samples_coarse,
+        tol_inside=tol_inside, cluster_eps=cluster_eps,
+        early_stop_at=N_target, pairlist=pairlist
+    )
     milestones[km_hi] = milestones.get(km_hi, hi)
     if km_hi < N_target:
         return None, milestones
@@ -396,9 +443,11 @@ def find_threshold_s_for_N(N_target: int,
     s_star = None
     for _ in range(max_iter):
         mid = 0.5*(lo+hi)
-        km, _, _ = max_multiplicity_for_scale(sublattices, p, 1, mid,
-                                              k_samples=k_samples_fine,
-                                              tol_inside=tol_inside, cluster_eps=cluster_eps)
+        km, _, _ = max_multiplicity_for_scale(
+            sublattices, p, 1, mid, k_samples=k_samples_fine,
+            tol_inside=tol_inside, cluster_eps=cluster_eps,
+            early_stop_at=N_target, pairlist=pairlist
+        )
         milestones[km] = milestones.get(km, mid)
         if km >= N_target:
             s_star = mid
@@ -411,7 +460,7 @@ def find_threshold_s_for_N(N_target: int,
 
 
 # -------------------------------
-# CN helpers
+# CN (representative site) with no double-counting
 # -------------------------------
 
 def _geo_key_and_arrays(sublattices: List[Sublattice], p: LatticeParams):
@@ -426,16 +475,11 @@ def compute_cn_representative(
     sub_index: int,
     scale_s: float,
     k_filter: int = 6,
-    mode: str = "exact",           # "exact" or "geq"
+    mode: str = "exact",
     k_samples: int = 12,
     tol_surface: float = 1e-3,
     cluster_eps: Optional[float] = None,
 ) -> int:
-    """
-    CN for one representative metal center in sublattice `sub_index`.
-    Counts each hotspot once by assigning it to its single nearest
-    metal center under periodic boundary conditions (min over 27 images).
-    """
     key, centers, alphas, sub_ids, shifts = _geo_key_and_arrays(sublattices, p)
     mask = (sub_ids == int(sub_index))
     if centers.size == 0 or not np.any(mask) or not sublattices[sub_index].visible:
@@ -444,7 +488,6 @@ def compute_cn_representative(
     rep_idx = int(np.flatnonzero(mask)[0])
     rep_radius = float(alphas[rep_idx] * scale_s * p.a)
 
-    # Hotspots (clustered)
     _, reps, repc = max_multiplicity_for_scale(
         sublattices, p, 1, scale_s, k_samples=k_samples,
         tol_inside=tol_surface,
@@ -455,16 +498,14 @@ def compute_cn_representative(
         return 0
     reps = np.asarray(reps); repc = np.asarray(repc, int)
 
-    # Multiplicity filter
     if mode == "exact":
         pick = np.where(repc == int(k_filter))[0]
     else:
         pick = np.where(repc >= int(k_filter))[0]
     if pick.size == 0:
         return 0
-    pts = reps[pick]  # (M,3)
+    pts = reps[pick]
 
-    # Assign each hotspot to its single nearest metal center across all images
     if _HAVE_SCIPY:
         tree = KDTree(centers.copy())
         cn = 0
@@ -480,12 +521,11 @@ def compute_cn_representative(
                 cn += 1
         return cn
     else:
-        # Fallback w/o KDTree: brute-force nearest over all images (vectorised)
-        all_centers = np.vstack([centers + S for S in shifts])  # (27*N,3)
-        d = np.linalg.norm(pts[:, None, :] - all_centers[None, :, :], axis=2)  # (M,27*N)
-        nn = np.argmin(d, axis=1)  # nearest (over all images)
+        all_centers = np.vstack([centers + S for S in shifts])
+        d = np.linalg.norm(pts[:, None, :] - all_centers[None, :, :], axis=2)
+        nn = np.argmin(d, axis=1)
         dmin = d[np.arange(len(pts)), nn]
         N = len(centers)
-        idx = (nn % N)  # map back to central-cell index
+        idx = (nn % N)
         ok = (idx == rep_idx) & (np.abs(dmin - rep_radius) <= tol_surface)
         return int(np.count_nonzero(ok))
