@@ -2,7 +2,6 @@
 # streamlit_app.py
 # Interstitial-site finder — fast pair-circle engine
 # Chemistry mode + 3D unit cell + radius-ratio scans
-# Global lattice + Wyckoff-like site presets per sublattice
 # JSON export of last scan
 # =====================================================
 
@@ -10,8 +9,8 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-import json  # <-- added for JSON export
-from typing import List, Dict, Tuple, Optional, Union
+import json
+from typing import List, Dict, Tuple, Optional
 
 from interstitial_engine import (
     LatticeParams,
@@ -20,7 +19,7 @@ from interstitial_engine import (
     find_threshold_s_for_N,
     lattice_vectors,
     bravais_basis,
-    frac_to_cart,
+    frac_to_cart,  # keep this one
 )
 
 # -------------------------------
@@ -52,13 +51,9 @@ METAL_RADII: Dict[str, Dict[int, float]] = {
     "La": {3: 1.032}, "Ce": {3: 1.01, 4: 0.87}, "Pr": {3: 0.99}, "Nd": {3: 0.983},
     "Sm": {3: 0.958}, "Eu": {2: 1.25, 3: 0.947}, "Gd": {3: 0.938}, "Tb": {3: 0.923},
     "Dy": {3: 0.912}, "Ho": {3: 0.901}, "Er": {3: 0.89}, "Tm": {3: 0.88},
-    "Yb": {2: 1.16, 3: 0.868}, "Lu": {3: 0.861},
+    "Yb": {2: 1.16}, "Lu": {3: 0.861},
     "B": {3: 0.27}, "P": {5: 0.52}, "As": {5: 0.60}, "Sb": {5: 0.74}, "Bi": {3: 1.03, 5: 0.76},
 }
-
-def norm_el(sym: str) -> str:
-    sym = sym.strip()
-    return sym[0].upper() + sym[1:].lower() if sym else sym
 
 # -------------------------------
 # Wyckoff-like presets per global lattice
@@ -172,11 +167,15 @@ st.set_page_config(page_title="Interstitial-site finder — fast visualiser logi
 st.title("Interstitial-site finder — fast pair-circle engine (Streamlit)")
 
 # -------------------------------
-# GLOBAL LATTICE (type + metrics shared by all sublattices)
+# GLOBAL LATTICE
 # -------------------------------
 st.sidebar.header("Global lattice")
 global_bravais_choices = list(Wyck.keys())
-global_bravais = st.sidebar.selectbox("Bravais / Space-group family", global_bravais_choices, index=global_bravais_choices.index("cubic_F"))
+global_bravais = st.sidebar.selectbox(
+    "Bravais / Space-group family",
+    global_bravais_choices,
+    index=global_bravais_choices.index("cubic_F"),
+)
 a = st.sidebar.number_input("a (lattice unit, Å)", 0.1, 10.0, 1.0, 0.01)
 b_ratio = st.sidebar.number_input("b/a", 0.1, 5.0, 1.0, 0.01)
 c_ratio = st.sidebar.number_input("c/a", 0.1, 5.0, 1.0, 0.01)
@@ -208,12 +207,9 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
         offx = offy = offz = 0.0
         if choice == "Free position":
             ccols = st.columns(3)
-            with ccols[0]:
-                offx = st.number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offx{idx}")
-            with ccols[1]:
-                offy = st.number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offy{idx}")
-            with ccols[2]:
-                offz = st.number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offz{idx}")
+            offx = ccols[0].number_input(f"offset x {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offx{idx}")
+            offy = ccols[1].number_input(f"offset y {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offy{idx}")
+            offz = ccols[2].number_input(f"offset z {idx}", -1.0, 1.0, 0.0, 0.01, key=f"offz{idx}")
         else:
             spec = Wyck[global_bravais][choice]
             xyz = spec["xyz"]
@@ -232,21 +228,17 @@ def edit_sublattice(idx: int, use_chem: bool) -> Sublattice:
 
         if use_chem:
             c1, c2 = st.columns(2)
-            with c1:
-                elements = sorted(METAL_RADII.keys())
-                default_el = "Fe" if idx == 1 else elements[0]
-                el = st.selectbox(f"Metal {idx}", elements, index=elements.index(default_el), key=f"el{idx}")
-                ox_states = sorted(METAL_RADII[el].keys())
-                oxid = st.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"oxid{idx}")
-                r_metal_default = METAL_RADII[el][oxid]
-            with c2:
-                r_override = st.number_input(
-                    f"Manual metal radius {idx} (Å, optional)", 0.0, 3.0,
-                    value=float(r_metal_default),
-                    step=0.01, key=f"rman{idx}"
-                )
-                use_override = st.checkbox(f"Use manual metal radius {idx}", value=False, key=f"useman{idx}")
-
+            elements = sorted(METAL_RADII.keys())
+            default_el = "Fe" if idx == 1 else elements[0]
+            el = c1.selectbox(f"Metal {idx}", elements, index=elements.index(default_el), key=f"el{idx}")
+            ox_states = sorted(METAL_RADII[el].keys())
+            oxid = c1.selectbox(f"Oxidation {idx}", ox_states, index=0, key=f"oxid{idx}")
+            r_metal_default = METAL_RADII[el][oxid]
+            r_override = c2.number_input(
+                f"Manual metal radius {idx} (Å, optional)",
+                0.0, 3.0, value=float(r_metal_default), step=0.01, key=f"rman{idx}"
+            )
+            use_override = c2.checkbox(f"Use manual metal radius {idx}", value=False, key=f"useman{idx}")
             r_metal = float(r_override) if use_override else float(r_metal_default)
             alpha_ratio = r_metal + r_anion
             st.caption(f"α_{idx} = r_metal ({r_metal:.3f}) + r_{anion} ({r_anion:.3f}) = {alpha_ratio:.3f} Å")
@@ -446,14 +438,10 @@ st.divider()
 st.subheader("3D Unit Cell Visualiser")
 
 colv = st.columns(4)
-with colv[0]:
-    vis_s = st.number_input("Visualise at s", 0.0, 5.0, max(0.001, 0.35), 0.001, key="vis_s")
-with colv[1]:
-    show_mult = st.number_input("Show intersections with multiplicity N =", 2, 24, value=4, step=1)
-with colv[2]:
-    marker_size = st.slider("Marker size (Å)", 0.05, 0.5, 0.15, 0.01)
-with colv[3]:
-    draw_btn = st.button("Render unit cell view")
+vis_s = colv[0].number_input("Visualise at s", 0.0, 5.0, max(0.001, 0.35), 0.001, key="vis_s")
+show_mult = colv[1].number_input("Show intersections with multiplicity N =", 2, 24, value=4, step=1)
+marker_size = colv[2].slider("Marker size (Å)", 0.05, 0.5, 0.15, 0.01)
+draw_btn = colv[3].button("Render unit cell view")
 
 def _cell_corners_and_edges(a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int,int]]]:
     fracs = np.array([
@@ -484,6 +472,7 @@ def _points_for_sublattice(sub: Sublattice, p: LatticeParams) -> np.ndarray:
     return np.asarray(pts)
 
 def _cart_to_frac(cart: np.ndarray, a_vec: np.ndarray, b_vec: np.ndarray, c_vec: np.ndarray) -> np.ndarray:
+    # local helper: inverse of frac_to_cart for this view only
     M = np.vstack([a_vec, b_vec, c_vec]).T
     return np.linalg.solve(M, cart.T).T
 
@@ -523,7 +512,7 @@ if draw_btn:
 
     palette = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
     for idx, (name, pts) in enumerate(sub_pts):
-        if len(pts)==0: 
+        if len(pts)==0:
             continue
         fig.add_trace(go.Scatter3d(
             x=pts[:,0], y=pts[:,1], z=pts[:,2],
