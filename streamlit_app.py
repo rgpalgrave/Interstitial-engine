@@ -1,7 +1,7 @@
 # =====================================================
-# streamlit_app.py
-# Interstitial-site finder — K_max scans (with CSV/JSON export)
-# Button fix: plain button (no on_click nonce)
+# streamlit_app_v2.py
+# Interstitial-site finder — K_max tool (OPTIMIZED)
+# Uses all_pairlist for fast parameter scans
 # =====================================================
 
 import streamlit as st
@@ -11,11 +11,12 @@ import plotly.graph_objects as go
 import io, json
 from typing import List, Dict, Tuple, Optional
 
-from interstitial_engine import (
+from interstitial_engine_v2 import (
     LatticeParams, Sublattice,
     max_multiplicity_for_scale, find_threshold_s_for_N,
     lattice_vectors, bravais_basis, frac_to_cart, _cart_to_frac,
-    compute_cn_representative, build_pairlist, PairList
+    compute_cn_representative, build_pairlist, build_all_pairlist,
+    PairList, AllPairList
 )
 
 # --------- Chemistry radii ---------
@@ -46,7 +47,7 @@ METAL_RADII = {
     "B":{3:0.27},"P":{5:0.52},"As":{5:0.60},"Sb":{5:0.74},"Bi":{3:1.03,5:0.76},
 }
 
-# --------- Wyck-like presets ---------
+# --------- Wyckoff presets ---------
 Wyck = {
     "cubic_P":{"1a (0,0,0)":{"type":"fixed","xyz":(0,0,0)},
                "1b (1/2,1/2,1/2)":{"type":"fixed","xyz":(0.5,0.5,0.5)},
@@ -115,8 +116,8 @@ Wyck = {
                    "1b (x,y,z)":{"type":"free","xyz":("x","y","z")}},
 }
 
-st.set_page_config(page_title="Interstitial-site finder — K_max scans", layout="wide")
-st.title("Interstitial-site finder — K_max scans (with CSV/JSON export)")
+st.set_page_config(page_title="Interstitial-site finder — K_max scans (OPTIMIZED)", layout="wide")
+st.title("Interstitial-site finder — K_max scans (OPTIMIZED v2)")
 
 # ---------- Global lattice ----------
 st.sidebar.header("Global lattice")
@@ -208,15 +209,15 @@ with colB:
     N_target = st.slider("Target N", 2, 24, 6)
     s_min = st.number_input("s_min", 0.0, 5.0, 0.01, 0.001)
     s_max = st.number_input("s_max", 0.0, 5.0, 0.9, 0.001)
-    use_pairlist_bisect = st.checkbox("Accelerate bisection with precomputed pairs (uses s_max)", value=True)
+    use_all_pairlist = st.checkbox("Accelerate with all-pairs (MUCH faster)", value=True)
     if st.button("Find s*_N (bisection)"):
-        pl: Optional[PairList] = build_pairlist(subs, p, s_max) if use_pairlist_bisect else None
+        all_pl: Optional[AllPairList] = build_all_pairlist(subs, p) if use_all_pairlist else None
         s_star, milestones = find_threshold_s_for_N(
             N_target, subs, p, repeat_ignored=1,
             s_min=s_min, s_max=s_max,
             k_samples_coarse=k_coarse, k_samples_fine=k_fine,
             tol_inside=tol_inside, cluster_eps=cluster_eps * a,
-            pairlist=pl
+            all_pairlist=all_pl
         )
         if s_star is None:
             st.error(f"Did not reach N={N_target} in [{s_min}, {s_max}].")
@@ -224,7 +225,7 @@ with colB:
             st.success(f"s*_{N_target} ≈ {s_star:.6f}")
             st.caption(f"Milestones seen (first s for each m): {milestones}")
 
-# ---------- Parameter scan (fast 1D; exportable) ----------
+# ---------- Parameter scan (OPTIMIZED) ----------
 st.divider()
 st.subheader("Parameter scan: s*_N vs parameter  •  Export CSV / JSON")
 
@@ -232,7 +233,6 @@ struct_params = ["a","b_ratio","c_ratio","alpha","beta","gamma"]
 alpha_targets = ["alpha_scalar (all sublattices)"] + [f"alpha(Sub {i+1})" for i in range(n_sub)]
 scan_target = st.selectbox("Parameter to scan", struct_params + alpha_targets, index=2, key="scan_target")
 
-# sensible defaults
 if scan_target in ("b_ratio","c_ratio"):
     vmin_default, vmax_default, xlabel = 0.5, 1.5, scan_target
 elif scan_target in ("alpha","beta","gamma"):
@@ -249,8 +249,6 @@ steps = st.slider("Steps", 5, 401, 51, key="scan_steps")
 Ns = [2,3,4,5,6]
 srange_min = st.number_input("s_min (radius scale)", 0.0, 5.0, 0.01, 0.001, key="scan_smin")
 srange_max = st.number_input("s_max (radius scale)", 0.0, 5.0, 0.9, 0.001, key="scan_smax")
-
-use_pairlist_scan = st.checkbox("Accelerate scan with precomputed pairs (uses s_max at each step)", value=True)
 
 def clone_params(base: LatticeParams, **kw) -> LatticeParams:
     d = dict(a=base.a, b_ratio=base.b_ratio, c_ratio=base.c_ratio,
@@ -272,7 +270,9 @@ def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[S
         out.append(Sublattice(s.name, s.bravais, s.offset_frac, new_alpha, s.visible))
     return out
 
-run_scan = st.button("Run scan", key="run_scan_btn")  # <-- fixed
+if "scan_nonce" not in st.session_state: st.session_state.scan_nonce = 0
+def _bump_nonce(): st.session_state.scan_nonce += 1
+run_scan = st.button("Run scan", key=f"run_scan_btn_{st.session_state.scan_nonce}", on_click=_bump_nonce)
 
 if run_scan:
     xs = np.linspace(vmin, vmax, int(steps))
@@ -280,17 +280,25 @@ if run_scan:
     progress = st.progress(0, text="Scanning…")
 
     static_centers = scan_target.startswith("alpha")
-    global_pairlist: Optional[PairList] = build_pairlist(subs, p, srange_max) if (use_pairlist_scan and static_centers) else None
+    
+    # NEW: Pre-compute all-pairs once for alpha scans
+    global_all_pairlist: Optional[AllPairList] = None
+    if static_centers:
+        # For alpha scans, geometry is fixed, only alphas change
+        # So we can pre-compute all pairs once
+        global_all_pairlist = build_all_pairlist(subs, p)
 
     for i, val in enumerate(xs):
         if scan_target in struct_params:
+            # Lattice param changed → rebuild geometry + all-pairs
             p_i = clone_params(p, **{scan_target: float(val)})
             subs_i = subs
-            pl_i = build_pairlist(subs_i, p_i, srange_max) if use_pairlist_scan else None
+            all_pl_i = build_all_pairlist(subs_i, p_i)
         else:
+            # Alpha scan → reuse geometry, just change alphas
             p_i = p
             subs_i = apply_alpha_scan(subs, scan_target, float(val))
-            pl_i = global_pairlist
+            all_pl_i = global_all_pairlist
 
         for N in Ns:
             s_star, _ = find_threshold_s_for_N(
@@ -298,7 +306,7 @@ if run_scan:
                 s_min=srange_min, s_max=srange_max,
                 k_samples_coarse=k_coarse, k_samples_fine=k_fine,
                 tol_inside=tol_inside, cluster_eps=cluster_eps * p_i.a,
-                max_iter=20, pairlist=pl_i
+                max_iter=20, all_pairlist=all_pl_i
             )
             curves[N][i] = s_star if s_star is not None else np.nan
 
@@ -312,7 +320,7 @@ if run_scan:
     ax.set_title("Threshold radii vs parameter"); ax.legend()
     st.pyplot(fig, clear_figure=True); plt.close(fig)
 
-    # Save results to session for export
+    # Save results
     st.session_state["last_scan"] = {
         "scan_target": scan_target,
         "x_label": xlabel,
@@ -339,152 +347,41 @@ if run_scan:
         "chemistry": {"anion": anion, "r_anion": r_anion}
     }
 
-# ---------- Export last scan ----------
+# ---------- Export ----------
 st.divider()
 st.subheader("Export last scan")
 
 if "last_scan" in st.session_state:
     payload = st.session_state["last_scan"]
-    xs = payload["x_values"]; Ns = payload["Ns"]
-
-    # Wide CSV
-    import pandas as pd
+    xs = payload["x_values"]
+    Ns = payload["Ns"]
     rows = []
     for i, x in enumerate(xs):
         row = {"x": x}
         for N in Ns:
             row[f"s*_N={N}"] = payload["curves"][int(N)][i]
         rows.append(row)
+
+    import pandas as pd
     df = pd.DataFrame(rows)
     csv_buf = io.StringIO(); df.to_csv(csv_buf, index=False)
     csv_bytes = csv_buf.getvalue().encode("utf-8")
-
-    # Long (tidy) CSV
-    tidy_rows = []
-    for i, x in enumerate(xs):
-        for N in Ns:
-            tidy_rows.append({"x": x, "N": int(N), "s_star": payload["curves"][int(N)][i]})
-    df_tidy = pd.DataFrame(tidy_rows)
-    csv_tidy = io.StringIO(); df_tidy.to_csv(csv_tidy, index=False)
-    csv_tidy_bytes = csv_tidy.getvalue().encode("utf-8")
-
-    # JSON (full metadata)
     json_bytes = json.dumps(payload, indent=2).encode("utf-8")
 
     st.dataframe(df.head(min(10, len(df))))
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        st.download_button("⬇️ Download CSV (wide)", data=csv_bytes, file_name="kmax_scan_wide.csv", mime="text/csv")
+        st.download_button(
+            label="⬇️ Download CSV (x, s*₂..s*₆)",
+            data=csv_bytes, file_name="kmax_scan.csv",
+            mime="text/csv"
+        )
     with c2:
-        st.download_button("⬇️ Download CSV (tidy/long)", data=csv_tidy_bytes, file_name="kmax_scan_tidy.csv", mime="text/csv")
-    with c3:
-        st.download_button("⬇️ Download JSON (full)", data=json_bytes, file_name="kmax_scan.json", mime="application/json")
+        st.download_button(
+            label="⬇️ Download JSON (full metadata)",
+            data=json_bytes, file_name="kmax_scan.json",
+            mime="application/json"
+        )
+    st.caption("CSV is compact for analysis; JSON preserves full lattice/sublattice setup for reproducibility.")
 else:
     st.info("Run a scan to enable export.")
-
-# ---------- CN (rep site) ----------
-st.divider()
-st.subheader("Coordination numbers (representative site per sublattice)")
-colc = st.columns(5)
-cn_s = colc[0].number_input("Evaluate CN at s", 0.0, 5.0, 0.35, 0.001, key="cn_s")
-cn_k = colc[1].number_input("Multiplicity k", 2, 24, 6, step=1)
-cn_mode = colc[2].selectbox("k mode", ["exact","geq"], index=0)
-cn_samples = colc[3].select_slider("Samples/circle", options=[6,8,12,16,24,32], value=12)
-run_cn = colc[4].button("Compute CNs")
-
-if run_cn:
-    import pandas as pd
-    rows = []
-    for i, sub in enumerate(subs):
-        if not sub.visible:
-            rows.append({"Sublattice": sub.name, "Bravais": sub.bravais, "Enabled": False, "α (Å)": round(sub.alpha_ratio,4), "CN": None})
-            continue
-        cn_val = compute_cn_representative(
-            sublattices=subs, p=p, sub_index=i, scale_s=cn_s,
-            k_filter=int(cn_k), mode=cn_mode,
-            k_samples=int(cn_samples), tol_surface=tol_inside,
-            cluster_eps=cluster_eps * a
-        )
-        rows.append({"Sublattice": sub.name, "Bravais": sub.bravais, "Enabled": True, "α (Å)": round(sub.alpha_ratio,4),
-                     f"CN_{cn_mode}(k={cn_k})": cn_val})
-    st.dataframe(pd.DataFrame(rows))
-    st.caption("CN is computed on one representative site under full PBC (no double counting).")
-
-# ---------- 3D unit cell viewer ----------
-st.divider()
-st.subheader("3D Unit Cell Visualiser")
-colv = st.columns(4)
-vis_s = colv[0].number_input("Visualise at s", 0.0, 5.0, max(0.001,0.35), 0.001, key="vis_s")
-show_mult = colv[1].number_input("Show intersections with multiplicity N =", 2, 24, value=4, step=1)
-marker_size = colv[2].slider("Marker size (Å)", 0.05, 0.5, 0.15, 0.01)
-draw_btn = colv[3].button("Render unit cell view")
-
-def _points_for_sublattice(sub: Sublattice, p: LatticeParams) -> np.ndarray:
-    a_vec, b_vec, c_vec = lattice_vectors(p)
-    basis = bravais_basis(sub.bravais)
-    off = np.array(sub.offset_frac, float)
-    pts = []
-    for b in basis:
-        f = np.mod(np.asarray(b) + off, 1.0)
-        pts.append(frac_to_cart(f, a_vec, b_vec, c_vec))
-    return np.asarray(pts)
-
-def _cell_corners_and_edges(a_vec, b_vec, c_vec):
-    fracs = np.array([
-        [0,0,0],[1,0,0],[0,1,0],[0,0,1],
-        [1,1,0],[1,0,1],[0,1,1],[1,1,1]
-    ], float)
-    M = np.vstack([a_vec,b_vec,c_vec]).T
-    corners = (fracs @ M.T)
-    edges = [(0,1),(0,2),(0,3),(1,4),(1,5),(2,4),(2,6),(3,5),(3,6),(4,7),(5,7),(6,7)]
-    return corners, edges
-
-if draw_btn:
-    a_vec, b_vec, c_vec = lattice_vectors(p)
-    sub_pts = [(sub.name, _points_for_sublattice(sub, p)) for sub in subs if sub.visible]
-
-    m_all, reps, repc = max_multiplicity_for_scale(
-        subs, p, repeat_ignored=1, scale_s=vis_s,
-        k_samples=max(8, int(k_fine)), tol_inside=tol_inside,
-        cluster_eps=cluster_eps * a, early_stop_at=None
-    )
-    tol_frac = 1e-6
-    rep_list = []
-    for pt, cnt in zip(reps, repc):
-        if int(cnt) != int(show_mult): continue
-        f = _cart_to_frac(np.asarray(pt), a_vec, b_vec, c_vec)
-        if np.all(f >= -tol_frac) and np.all(f <= 1.0 + tol_frac):
-            rep_list.append(pt)
-    rep_arr = np.asarray(rep_list) if rep_list else np.empty((0,3))
-
-    fig = go.Figure()
-    corners, edges = _cell_corners_and_edges(a_vec,b_vec,c_vec)
-    for i,j in edges:
-        fig.add_trace(go.Scatter3d(x=[corners[i,0],corners[j,0]],
-                                   y=[corners[i,1],corners[j,1]],
-                                   z=[corners[i,2],corners[j,2]],
-                                   mode="lines", line=dict(width=4), showlegend=False))
-    palette = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
-    for idx,(name, pts) in enumerate(sub_pts):
-        if len(pts)==0: continue
-        fig.add_trace(go.Scatter3d(x=pts[:,0], y=pts[:,1], z=pts[:,2],
-                                   mode="markers", marker=dict(size=6, opacity=0.9),
-                                   name=f"{name} sites",
-                                   marker_symbol="circle",
-                                   legendgroup=f"sub{idx}",
-                                   marker_color=palette[idx % len(palette)]))
-    if rep_arr.size:
-        fig.add_trace(go.Scatter3d(x=rep_arr[:,0], y=rep_arr[:,1], z=rep_arr[:,2],
-                                   mode="markers",
-                                   marker=dict(size=max(2,int(marker_size/max(1e-9,a)*30)), opacity=0.95),
-                                   name=f"Intersections N={show_mult}",
-                                   marker_symbol="diamond"))
-    else:
-        st.info("No intersections of that multiplicity in the central cell at this s.")
-
-    fig.update_scenes(aspectmode="data")
-    fig.update_layout(scene=dict(xaxis_title="x (Å)", yaxis_title="y (Å)", zaxis_title="z (Å)",
-                                 xaxis=dict(showbackground=False), yaxis=dict(showbackground=False), zaxis=dict(showbackground=False)),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                      margin=dict(l=0,r=0,t=0,b=0), height=700)
-    st.plotly_chart(fig, use_container_width=True)
