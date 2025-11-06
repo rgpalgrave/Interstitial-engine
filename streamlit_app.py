@@ -1,7 +1,7 @@
 # =====================================================
-# streamlit_app.py (TURBO ULTRA)
+# streamlit_app.py (TURBO ULTRA v2)
 # Interstitial-site finder — BLAZING FAST 1D scanning
-# Parallel execution + vectorized caching + minimal recomputation
+# Enhanced: a≥1.0, free placement, linked ratios, CSV export
 # =====================================================
 
 import streamlit as st
@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from typing import List, Dict, Tuple, Optional, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
+import io
+import csv
 
 from interstitial_engine import (
     LatticeParams,
@@ -65,6 +66,7 @@ Wyck = {
         "3c (0,1/2,1/2)":      {"type": "fixed", "xyz": (0.0, 0.5, 0.5)},
         "3d (1/2,0,0)":        {"type": "fixed", "xyz": (0.5, 0.0, 0.0)},
         "6e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "cubic_F": {
         "4a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -73,6 +75,7 @@ Wyck = {
         "24d (0,1/4,1/4)":     {"type": "fixed", "xyz": (0.0, 0.25,0.25)},
         "24e (x,0,0)":         {"type": "free",  "xyz": ("x", 0.0, 0.0)},
         "32f (x,x,x)":         {"type": "free",  "xyz": ("x","x","x")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "cubic_I": {
         "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -80,6 +83,7 @@ Wyck = {
         "6c (0,1/2,0)":        {"type": "fixed", "xyz": (0.0, 0.5, 0.0)},
         "6d (1/2,0,0)":        {"type": "fixed", "xyz": (0.5, 0.0, 0.0)},
         "12e (x,0,0)":         {"type": "free",  "xyz": ("x", 0.0, 0.0)},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "tetragonal_P": {
         "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -93,6 +97,7 @@ Wyck = {
         "2i (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
         "2j (x,x,0)":          {"type": "free",  "xyz": ("x","x",0.0)},
         "2k (x,x,z)":          {"type": "free",  "xyz": ("x","x","z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "tetragonal_I": {
         "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -100,6 +105,7 @@ Wyck = {
         "4d (0,1/2,1/4)":      {"type": "fixed", "xyz": (0.0, 0.5, 0.25)},
         "4e (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0,"z")},
         "8g (0,1/2,z)":        {"type": "free",  "xyz": (0.0, 0.5,"z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "orthorhombic_P": {
         "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -109,21 +115,25 @@ Wyck = {
         "2e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
         "2f (0,y,0)":          {"type": "free",  "xyz": (0.0,"y", 0.0)},
         "2g (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0,"z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "orthorhombic_C": {
         "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "2b (0,1/2,0)":        {"type": "fixed", "xyz": (0.0, 0.5, 0.0)},
         "4g (0,y,0)":          {"type": "free",  "xyz": (0.0,"y", 0.0)},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "orthorhombic_I": {
         "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "2b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
         "4e (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0,"z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "orthorhombic_F": {
         "4a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "4b (1/2,1/2,1/2)":    {"type": "fixed", "xyz": (0.5, 0.5, 0.5)},
         "8f (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "hexagonal_P": {
         "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -133,6 +143,7 @@ Wyck = {
         "2e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
         "2f (x,x,0)":          {"type": "free",  "xyz": ("x","x", 0.0)},
         "2g (x,x,z)":          {"type": "free",  "xyz": ("x","x","z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "hexagonal_HCP": {
         "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
@@ -140,27 +151,32 @@ Wyck = {
         "2c (1/3,2/3,1/4)":    {"type": "fixed", "xyz": (1/3, 2/3, 0.25)},
         "2d (1/3,2/3,3/4)":    {"type": "fixed", "xyz": (1/3, 2/3, 0.75)},
         "4f (1/3,2/3,z)":      {"type": "free",  "xyz": (1/3, 2/3, "z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "rhombohedral_R": {
         "3a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "3b (0,0,1/2)":        {"type": "fixed", "xyz": (0.0, 0.0, 0.5)},
         "6c (0,0,z)":          {"type": "free",  "xyz": (0.0, 0.0, "z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "monoclinic_P": {
         "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "2e (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "monoclinic_C": {
         "2a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "4i (x,0,0)":          {"type": "free",  "xyz": ("x", 0.0, 0.0)},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
     "triclinic_P": {
         "1a (0,0,0)":          {"type": "fixed", "xyz": (0.0, 0.0, 0.0)},
         "1b (x,y,z)":          {"type": "free",  "xyz": ("x","y","z")},
+        "Free placement":      {"type": "free3d", "xyz": (0.0, 0.0, 0.0)},
     },
 }
 
-st.set_page_config(page_title="Interstitial-site finder — TURBO ULTRA", layout="wide")
+st.set_page_config(page_title="Interstitial-site finder — TURBO ULTRA v2", layout="wide")
 st.title("Interstitial-site finder — BLAZING FAST 1D Scan")
 
 # =====================================================
@@ -168,6 +184,8 @@ st.title("Interstitial-site finder — BLAZING FAST 1D Scan")
 # =====================================================
 if "run_count" not in st.session_state:
     st.session_state.run_count = 0
+if "last_scan_data" not in st.session_state:
+    st.session_state.last_scan_data = None
 
 # =====================================================
 # GLOBAL LATTICE PARAMS
@@ -183,7 +201,7 @@ with col_global[0]:
         key="global_bravais"
     )
 with col_global[1]:
-    a = st.number_input("a (Å)", 2.0, 20.0, 5.0, 0.1, key="global_a")
+    a = st.number_input("a (Å)", 1.0, 20.0, 5.0, 0.1, key="global_a")
 with col_global[2]:
     repeat = st.number_input("Supercell repeat", 1, 5, 1, key="global_repeat")
 
@@ -209,6 +227,31 @@ struct_params = ["a", "b_ratio", "c_ratio", "alpha", "beta", "gamma"]
 # =====================================================
 st.header("Sublattices")
 num_subs = st.number_input("Number of sublattices", 1, 6, 1, key="num_subs")
+
+# Linked ratios UI
+st.subheader("Linked Ratios (for synchronized scanning)")
+linked_pairs = []
+for i in range(int(num_subs) - 1):
+    col_link = st.columns(3)
+    with col_link[0]:
+        link_check = st.checkbox(f"Link Sub{i+1} ↔ Sub{i+2}", value=False, key=f"link_{i}_{i+1}")
+    with col_link[1]:
+        if link_check:
+            link_type = st.selectbox(f"Link type", ["ratio_a", "ratio_b"], key=f"link_type_{i}_{i+1}")
+            if link_type == "ratio_a":
+                st.caption(f"Sub{i+2} α = Sub{i+1} α × factor")
+            else:
+                st.caption(f"Sub{i+2} b/a = Sub{i+1} b/a")
+        else:
+            link_type = None
+    with col_link[2]:
+        if link_check:
+            factor = st.number_input(f"Factor", 0.1, 10.0, 1.0, 0.1, key=f"link_factor_{i}_{i+1}")
+        else:
+            factor = 1.0
+    if link_check:
+        linked_pairs.append({"from": i, "to": i+1, "type": link_type, "factor": factor})
+
 subs = []
 for i in range(int(num_subs)):
     st.subheader(f"Sublattice {i+1}")
@@ -225,6 +268,7 @@ for i in range(int(num_subs)):
         visible = st.checkbox("Visible", value=True, key=f"sub_visible_{i}")
 
     preset = Wyck[sub_bravais].get(preset_label, {"type": "fixed", "xyz": (0, 0, 0)})
+    
     if chem_mode:
         col_chem = st.columns(2)
         with col_chem[0]:
@@ -238,7 +282,17 @@ for i in range(int(num_subs)):
     else:
         alpha_ratio = st.number_input(f"α (Å) {i+1}", 0.01, 5.0, 1.0, 0.1, key=f"sub_alpha_{i}")
 
-    if preset["type"] == "free":
+    if preset["type"] == "free3d":
+        # Free 3D placement
+        col_free3d = st.columns(3)
+        with col_free3d[0]:
+            fx = st.number_input(f"x {i+1}", 0.0, 1.0, 0.0, 0.01, key=f"sub_free3d_x_{i}")
+        with col_free3d[1]:
+            fy = st.number_input(f"y {i+1}", 0.0, 1.0, 0.0, 0.01, key=f"sub_free3d_y_{i}")
+        with col_free3d[2]:
+            fz = st.number_input(f"z {i+1}", 0.0, 1.0, 0.0, 0.01, key=f"sub_free3d_z_{i}")
+        offset_frac = (fx, fy, fz)
+    elif preset["type"] == "free":
         offset = []
         for j, coord in enumerate(preset["xyz"]):
             if isinstance(coord, str):
@@ -278,7 +332,7 @@ with scan_col[1]:
 with scan_col[2]:
     vmax = st.number_input("Max", 0.0, 20.0, 2.0, 0.1, key="vmax")
 with scan_col[3]:
-    steps = st.number_input("Steps", 3, 50, 20, 1, key="steps")
+    steps = st.number_input("Points", 3, 100, 20, 1, key="steps")
 
 scan_col2 = st.columns(4)
 with scan_col2[0]:
@@ -297,7 +351,7 @@ with scan_col3[0]:
 with scan_col3[1]:
     max_workers = st.number_input("Parallel workers", 1, 16, 4, 1, key="max_workers")
 with scan_col3[2]:
-    st.write("")  # spacing
+    st.write("")
 
 def clone_params(base: LatticeParams, **kw) -> LatticeParams:
     d = dict(a=base.a, b_ratio=base.b_ratio, c_ratio=base.c_ratio,
@@ -305,7 +359,8 @@ def clone_params(base: LatticeParams, **kw) -> LatticeParams:
     d.update(kw)
     return LatticeParams(**d)
 
-def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[Sublattice]:
+def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float, linked_pairs: List[Dict]) -> List[Sublattice]:
+    """Apply alpha scan with optional linked ratio updates"""
     out: List[Sublattice] = []
     if mode == "alpha_scalar (all sublattices)":
         for s in subs_in:
@@ -320,6 +375,19 @@ def apply_alpha_scan(subs_in: List[Sublattice], mode: str, val: float) -> List[S
             out.append(Sublattice(s.name, s.bravais, s.offset_frac, alpha_ratio=new_alpha, visible=s.visible))
     else:
         out = [Sublattice(s.name, s.bravais, s.offset_frac, s.alpha_ratio, s.visible) for s in subs_in]
+    
+    # Apply linked ratio updates
+    for link in linked_pairs:
+        from_idx = link["from"]
+        to_idx = link["to"]
+        if from_idx < len(out):
+            from_sub = out[from_idx]
+            to_sub = out[to_idx]
+            if link["type"] == "ratio_a":
+                new_alpha = from_sub.alpha_ratio * link["factor"]
+                out[to_idx] = Sublattice(to_sub.name, to_sub.bravais, to_sub.offset_frac, 
+                                        alpha_ratio=new_alpha, visible=to_sub.visible)
+    
     return out
 
 # =====================================================
@@ -333,7 +401,7 @@ def compute_curve_point(idx: int, val: float, N: int, is_struct_param: bool) -> 
             subs_i = subs
         else:
             p_i = p
-            subs_i = apply_alpha_scan(subs, scan_target, float(val))
+            subs_i = apply_alpha_scan(subs, scan_target, float(val), linked_pairs)
 
         s_star, _ = find_threshold_s_for_N(
             N, subs_i, p_i, repeat,
@@ -359,7 +427,6 @@ if st.button("⚡ Run Parallel Scan", use_container_width=True):
     # Parallel execution
     is_struct = scan_target in struct_params
     with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
-        # Submit all tasks
         futures = {}
         for i, val in enumerate(xs):
             for N in Ns:
@@ -383,12 +450,20 @@ if st.button("⚡ Run Parallel Scan", use_container_width=True):
     progress_bar.empty()
     status_text.empty()
 
-    # Plot results
+    # Store scan data for export
+    st.session_state.last_scan_data = {
+        "xs": xs,
+        "curves": curves,
+        "label": label,
+        "scan_target": scan_target,
+    }
+
+    # Plot results (lines only, no markers)
     fig, ax = plt.subplots(figsize=(10, 6))
     for N in Ns:
         valid = ~np.isnan(curves[N])
         if np.any(valid):
-            ax.plot(xs[valid], curves[N][valid], "o-", label=f"N={N}", markersize=4)
+            ax.plot(xs[valid], curves[N][valid], label=f"N={N}", linewidth=2)
     ax.set_xlabel(label)
     ax.set_ylabel("s*_N (min radius scale)")
     ax.set_title("Threshold Radii vs Parameter (Parallel Scan)")
@@ -398,9 +473,73 @@ if st.button("⚡ Run Parallel Scan", use_container_width=True):
 
     st.success(f"✓ Scan complete! ({st.session_state.run_count} runs)")
 
+# =====================================================
+# EXPORT SCAN DATA
+# =====================================================
+if st.session_state.last_scan_data:
+    st.divider()
+    st.subheader("Export Scan Data")
+    
+    col_exp = st.columns(3)
+    with col_exp[0]:
+        export_format = st.selectbox("Format", ["CSV", "TSV", "JSON"], key="export_format")
+    with col_exp[1]:
+        st.write("")
+    with col_exp[2]:
+        export_btn = st.button("Download")
+    
+    if export_btn:
+        data = st.session_state.last_scan_data
+        xs = data["xs"]
+        curves = data["curves"]
+        
+        if export_format == "CSV" or export_format == "TSV":
+            delimiter = "," if export_format == "CSV" else "\t"
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter=delimiter)
+            
+            # Header
+            header = [data["label"]] + [f"N={N}" for N in sorted(curves.keys())]
+            writer.writerow(header)
+            
+            # Data rows
+            for i, x_val in enumerate(xs):
+                row = [str(x_val)]
+                for N in sorted(curves.keys()):
+                    s_val = curves[N][i]
+                    row.append(str(s_val) if not np.isnan(s_val) else "")
+                writer.writerow(row)
+            
+            filename = f"scan_{data['scan_target']}.{'csv' if export_format == 'CSV' else 'tsv'}"
+            st.download_button(
+                label=f"📥 Download {export_format}",
+                data=output.getvalue(),
+                file_name=filename,
+                mime="text/plain",
+                key="download_csv"
+            )
+        
+        elif export_format == "JSON":
+            import json
+            json_data = {
+                "scan_parameter": data["scan_target"],
+                "parameter_label": data["label"],
+                "x_values": xs.tolist(),
+                "curves": {str(N): [float(v) if not np.isnan(v) else None for v in curves[N]] 
+                          for N in curves}
+            }
+            filename = f"scan_{data['scan_target']}.json"
+            st.download_button(
+                label="📥 Download JSON",
+                data=json.dumps(json_data, indent=2),
+                file_name=filename,
+                mime="application/json",
+                key="download_json"
+            )
+
 st.caption(
-    "Global lattice type/metrics apply to all sublattices. Chemistry mode sets α_i = r_metal + r_anion (Å). "
-    "Parallel scan uses thread pool for speed."
+    "Global lattice type/metrics apply to all sublattices. Free placement allows (x,y,z) entry. "
+    "Linked ratios enable synchronized multi-sublattice scanning. Chemistry mode sets α_i = r_metal + r_anion (Å)."
 )
 
 # =====================================================
