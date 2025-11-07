@@ -1,21 +1,29 @@
-# syntax=docker/dockerfile:1
-FROM python:3.11-slim
+# Use official Python runtime as base image
+FROM python:3.9-slim
 
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy dependency list
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy all application files
+COPY streamlit_app__2_.py .
+COPY position_calculator.py .
+COPY interstitial_engine.py .
 
-# Copy the app itself
-COPY . .
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    streamlit>=1.28 \
+    plotly>=5.0 \
+    pandas>=1.5 \
+    numpy>=1.20 \
+    scipy>=1.8
 
-# Streamlit runs on the port Cloud Run gives via $PORT
-ENV PORT=8080
+# Expose Streamlit port
+EXPOSE 8080
+
+# Configure Streamlit
 ENV STREAMLIT_SERVER_PORT=8080
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
-ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+ENV STREAMLIT_SERVER_HEADLESS=true
 
-EXPOSE 8080
-CMD ["streamlit", "run", "streamlit_app.py"]
+# Run Streamlit app
+CMD ["streamlit", "run", "streamlit_app__2_.py"]
