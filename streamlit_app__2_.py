@@ -1047,7 +1047,8 @@ if st.session_state.structure is not None:
         
         # Add metal atoms
         palette = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b"]
-        for idx, sub_name in enumerate(structure.metal_atoms.sublattice_name):
+        unique_sublattices = np.unique(structure.metal_atoms.sublattice_name)
+        for idx, sub_name in enumerate(unique_sublattices):
             mask = structure.metal_atoms.sublattice_name == sub_name
             pts_cart = structure.metal_atoms.cartesian[mask]
             fig_pos.add_trace(go.Scatter3d(
