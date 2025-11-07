@@ -460,6 +460,7 @@ class CompleteStructureData:
     lattice_params: LatticeParams
     scale_s: float
     lattice_vectors: Tuple[np.ndarray, np.ndarray, np.ndarray]
+    target_N: Optional[int] = None
 
 
 def calculate_complete_structure(
@@ -512,7 +513,8 @@ def calculate_complete_structure(
         intersections=intersections,
         lattice_params=p,
         scale_s=scale_s,
-        lattice_vectors=vecs
+        lattice_vectors=vecs,
+        target_N=target_N
     )
 
 
